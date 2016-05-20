@@ -5,11 +5,13 @@
 #ifdef __cplusplus
 # define C_NAMESPACE_BEGIN	extern "C" {
 # define C_NAMESPACE_END	}
-# include <cstdio>
+# include <cstdio>	/* fprintf(3) */
+# include <cstdlib>	/* exit(3) */
 #else
 # define C_NAMESPACE_BEGIN
 # define C_NAMESPACE_END
-# include <stdio.h>
+# include <stdio.h>	/* fprintf(3) */
+# include <stdlib.h>	/* exit(3) */
 #endif
 
 #define DIE(code,...) do { fprintf(stderr, __VA_ARGS__); exit(code); } while (0)
