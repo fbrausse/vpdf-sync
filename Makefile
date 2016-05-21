@@ -18,7 +18,7 @@ WARN_FLAGS = -Wall -Wno-unused-function
 
 CC := $(CC) -std=c11
 CXX := $(CXX) -std=c++11
-CFLAGS   = -O2 $(WARN_FLAGS) -fopenmp
+CFLAGS   = -O2 $(WARN_FLAGS)
 CXXFLAGS = $(CFLAGS)
 #CPPFLAGS = -DNDEBUG
 LDFLAGS = $(CFLAGS) -Wl,--as-needed
@@ -32,6 +32,9 @@ CXX_SRCS = $(filter %.cc,$(SRCS))
 C_OBJS   = $(C_SRCS:.c=.o)
 CXX_OBJS = $(CXX_SRCS:.cc=.o)
 OBJS = $(C_OBJS) $(CXX_OBJS) ssim/ssim-impl.o
+
+vpdf-sync.o: CFLAGS += -fopenmp
+vpdf-sync: LDFLAGS += -fopenmp
 
 ifeq ($(V),1)
 Q :=
