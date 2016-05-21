@@ -3,6 +3,7 @@
 #include <stdio.h>	/* *printf(3) */
 #include <unistd.h>	/* getopt(3) */
 #include <sys/time.h>	/* gettimeofday(3) */
+#include <sys/stat.h>	/* stat(3) */
 #include <assert.h>
 
 #include "common.h"
@@ -17,10 +18,6 @@
 C_NAMESPACE_BEGIN
 
 #include "ssim/ssim-impl.h"
-
-extern struct vpdf_ren vpdf_ren_poppler_glib;
-extern struct vpdf_ren vpdf_ren_poppler_cpp;
-extern struct vpdf_ren vpdf_ren_gs;
 
 #include <libavformat/avformat.h>	/* avformat_*() */
 #include <libavutil/imgutils.h>		/* av_image_alloc() */
@@ -201,6 +198,8 @@ struct pimg {
 	int      strides[4];
 };
 
+#define PIMG_INIT	{ { NULL, NULL, NULL, NULL, }, { 0, 0, 0, 0, }, }
+
 static int frame_cmp_luma_only = 0;
 
 static void frame_cmp(const AVFrame *ref, const struct pimg *ren, double *ssim, double *psnr)
@@ -227,9 +226,13 @@ struct cimg {
 struct loc_ctx {
 	unsigned w, h;
 	struct cimg **buf;
+	struct pimg *pbuf;
 	struct pimg tmp;
+	int tmp_page_idx;
 	int page_from, page_to;
 	enum AVPixelFormat pix_fmt;
+	const char *dump_pat;
+	unsigned compress : 1;
 };
 /*
 static void pimg_swap(struct pimg *a, struct pimg *b)
@@ -277,7 +280,7 @@ static struct res * res_list_sorted_insert(struct res *r, const struct res *c, u
 }
 
 #ifdef _OPENMP
-#include <omp.h>
+//#include <omp.h>
 
 static void locate_omp(
 	const AVFrame *const ref, const struct loc_ctx *const ctx,
@@ -326,12 +329,12 @@ static void locate_single(
 		if (d >= ctx->page_from) {
 			frame_render_cmp(ref, ctx, d, &ctx->tmp, &ssim, &psnr);
 			res_list_sorted_insert(r, &(struct res){ d, ssim, psnr }, n_best);
-			d--;
+			((struct loc_ctx *)ctx)->tmp_page_idx = d--;
 		}
 		if (u < ctx->page_to) {
 			frame_render_cmp(ref, ctx, u, &ctx->tmp, &ssim, &psnr);
 			res_list_sorted_insert(r, &(struct res){ u, ssim, psnr }, n_best);
-			u++;
+			((struct loc_ctx *)ctx)->tmp_page_idx = u++;
 		}
 	}
 }
@@ -358,9 +361,13 @@ static int decoded_frame(
 	if (r->page_idx < 0) {
 		locate(fr[frame_idx&1], ctx, last_page, ARRAY_SIZE(r), r);
 		fprintf(stderr, "located ");
-	} else {
+	} else if (ctx->tmp_page_idx != r->page_idx) {
 		frame_render_cmp(fr[frame_idx&1], ctx, r->page_idx, &ctx->tmp, &r->ssim, &r->psnr);
+		((struct loc_ctx *)ctx)->tmp_page_idx = r->page_idx;
 		fprintf(stderr, "reused  ");
+	} else {
+		frame_cmp(fr[frame_idx&1], &ctx->tmp, &r->ssim, &r->psnr);
+		fprintf(stderr, "reused0 ");
 	}
 	fprintf(stderr, "cmp-to-page:");
 	for (unsigned i=0; i<ARRAY_SIZE(r); i++)
@@ -373,7 +380,8 @@ static int decoded_frame(
 }
 
 struct img_prep_args {
-	struct SwsContext *sws;
+	struct SwsContext *sws, *sws_ppm;
+	struct pimg        ppm;
 	struct loc_ctx    *ctx;
 	const AVPixFmtDescriptor *d;
 	int is_yuv;
@@ -387,8 +395,22 @@ void vpdf_image_prepare(
 	struct vpdf_image *img, const struct img_prep_args *a, unsigned page_idx
 ) {
 	int s = img->s;
-	const uint8_t *data = img->data;
-	sws_scale(a->sws, &data, &s, 0, img->h, a->ctx->tmp.planes, a->ctx->tmp.strides);
+	const uint8_t *data[4] = { img->data, NULL, NULL, NULL };
+
+	if (a->ctx->dump_pat) {
+		sws_scale(a->sws_ppm, data, &s, 0, a->ctx->h, a->ppm.planes, a->ppm.strides);
+		int len = snprintf(NULL, 0, a->ctx->dump_pat, page_idx);
+		char buf[len+1];
+		snprintf(buf, sizeof(buf), a->ctx->dump_pat, page_idx);
+		FILE *f = fopen(buf, "w");
+		fprintf(f, "P6 %u %u 255\n", a->ctx->w, a->ctx->h);
+		unsigned char *d = a->ppm.planes[0];
+		for (unsigned i=0; i < a->ctx->h; i++, d += a->ppm.strides[0])
+			fwrite(d, a->ctx->w, 3, f);
+		fclose(f);
+	}
+	sws_scale(a->sws, data, &s, 0, img->h, a->ctx->tmp.planes, a->ctx->tmp.strides);
+	a->ctx->tmp_page_idx = page_idx;
 
 	struct timeval v;
 	gettimeofday(&v, NULL);
@@ -436,6 +458,16 @@ static void render(
 	a.sws = sws_getContext(ctx->w, ctx->h, ren->fmt,
 	                       ctx->w, ctx->h, ctx->pix_fmt,
 	                       0, NULL, NULL, NULL);
+	a.sws_ppm = NULL;
+	if (ctx->dump_pat) {
+		a.sws_ppm = sws_getContext(ctx->w, ctx->h, ren->fmt,
+		                           ctx->w, ctx->h, AV_PIX_FMT_RGB24,
+		                           0, NULL, NULL, NULL);
+		int r;
+		if ((r = av_image_alloc(a.ppm.planes, a.ppm.strides,
+		                        ctx->w, ctx->h, AV_PIX_FMT_RGB24, 1)) < 0)
+			DIE(1, "error allocating raw video buffer: %s", fferror(r));
+	}
 	a.ctx = ctx;
 	a.compressed_buf = compressed_buf;
 	a.wrkmem = wrkmem;
@@ -451,6 +483,10 @@ static void render(
 	gettimeofday(a.u, NULL);
 	ren->render(ren_inst, ctx->page_from, ctx->page_to, &a);
 
+	if (a.sws_ppm) {
+		sws_freeContext(a.sws_ppm);
+		av_freep(a.ppm.planes);
+	}
 	sws_freeContext(a.sws);
 }
 
@@ -528,6 +564,10 @@ static void ff_vinput_close(struct ff_vinput *ff)
 	avformat_close_input(&ff->fmt_ctx);
 }
 
+extern struct vpdf_ren vpdf_ren_poppler_glib;
+extern struct vpdf_ren vpdf_ren_poppler_cpp;
+extern struct vpdf_ren vpdf_ren_gs;
+
 static struct {
 	char *id;
 	struct vpdf_ren *r;
@@ -551,11 +591,13 @@ static void usage(const char *progname)
 Options [defaults]:\n\
   -c           toggle compare luma plane only [%s]\n\
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [%g]\n\
+  -D DIR       dump rendered images into DIR\n\
   -f PG_FROM   page interval start (inclusive) [0]\n\
   -h           display this help message\n\
   -l IMPL_ID   select implementation for locate: [single]%s\n\
   -r REN       use REN to render PDF [%s]\n\
   -t PG_TO     page interval stop (exclusive) [page-num]\n\
+  -u           don't compress pages (watch out for OOM)\n\
 ",
 	       frame_cmp_luma_only ? "yes" : "no",
 	       VPDF_SYNC_VID_DIFF_SSIM,
@@ -597,11 +639,14 @@ int main(int argc, char **argv)
 	locate_f *locate = locate_single;
 	char *endptr;
 	double vid_diff_ssim = VPDF_SYNC_VID_DIFF_SSIM;
+	char *dump_dir = NULL;
 
 	int page_from = 0;
 	int page_to   = -1;
+	int compress  = 1;
 	int opt;
-	while ((opt = getopt(argc, argv, ":cd:f:hl:r:t:")) != -1)
+	struct stat st;
+	while ((opt = getopt(argc, argv, ":cd:D:f:hl:r:t:u")) != -1)
 		switch (opt) {
 		case 'c':
 			frame_cmp_luma_only = !frame_cmp_luma_only;
@@ -610,6 +655,12 @@ int main(int argc, char **argv)
 			vid_diff_ssim = strtof(optarg, &endptr);
 			if (*endptr)
 				DIE(1, "expected float parameter for option '-d'\n");
+			break;
+		case 'D':
+			if (stat(dump_dir = optarg, &st) != 0)
+				DIE(1, "unable to stat() '%s': %s\n", optarg, strerror(errno));
+			if (!S_ISDIR(st.st_mode))
+				DIE(1, "option -D expects path to a directory, '%s' is none\n", optarg);
 			break;
 		case 'f':
 			page_from = strtol(optarg, &endptr, 10);
@@ -635,6 +686,7 @@ int main(int argc, char **argv)
 			if (*endptr)
 				DIE(1, "expected decimal parameter for option '-t'\n");
 			break;
+		case 'u': compress = 0; break;
 		case ':':
 			DIE(1, "error: option '-%c' required a parameter\n",
 			    optopt);
@@ -664,7 +716,6 @@ int main(int argc, char **argv)
 	} else if (!ren->can_render)
 		DIE(1, "selected PDF renderer %s cannot render\n", ren_id);
 
-
 	if (argc - optind < 1)
 		DIE(1, "error: expected arguments: VID ...\n");
 
@@ -688,12 +739,19 @@ int main(int argc, char **argv)
 
 	void *ren_inst = ren->create(argc, argv, w, h);
 	unsigned n_pages = ren->n_pages(ren_inst);
+
+#define VPDF_SYNC_DUMP_PAT_PAT	"%s/%s-%%04d.ppm"
+	int len = snprintf(NULL, 0, VPDF_SYNC_DUMP_PAT_PAT, dump_dir, ren_id);
+	char dump_pat_buf[len+1];
+	snprintf(dump_pat_buf, sizeof(dump_pat_buf), VPDF_SYNC_DUMP_PAT_PAT, dump_dir, ren_id);
+
 	if (page_to < 0 || page_to > n_pages)
 		page_to = n_pages;
 	n_pages = page_to - page_from;
 	struct cimg *imgs[n_pages];
 	struct loc_ctx ctx = {
-		w, h, imgs, {}, page_from, page_to, vin.vid_ctx->pix_fmt,
+		w, h, imgs, NULL, PIMG_INIT, -1, page_from, page_to,
+		vin.vid_ctx->pix_fmt, dump_dir ? dump_pat_buf : NULL, compress,
 	};
 	if ((r = av_image_alloc(ctx.tmp.planes, ctx.tmp.strides,
 	                        w, h, vin.vid_ctx->pix_fmt, 1)) < 0)
