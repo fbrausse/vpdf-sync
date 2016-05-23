@@ -521,7 +521,7 @@ void vpdf_image_prepare(
 	        a->ctx->page_to - a->ctx->page_from,
 	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
 
-	if (a->ctx->ren_dump_pat)
+	if (0 && a->ctx->ren_dump_pat)
 		ppm_export(a->sws_ppm, w, a->ctx->h - a->crop[0] - a->crop[1],
 		           &(struct pimg){ { data, }, { img->s, } },
 		           &a->ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
@@ -530,12 +530,12 @@ void vpdf_image_prepare(
 	struct pimg tgt = a->ctx->tmp;
 #elif 1
 	struct pimg tgt;
-	for (unsigned i=0; i<4; i++) {
-		memset(a->ctx->tmp.planes[i], a->is_yuv ? i ? 0x80 : 0x10 : 0x00,
-		       -(-a->ctx->h >> (a->is_yuv && i ? a->d->log2_chroma_h : 0)) * a->ctx->tmp.strides[i]);
+	for (unsigned i=0; i<nb_tgt_planes; i++) {/*
+		memset(a->ctx->tmp.planes[i], black[a->is_yuv][i],
+		       -(-a->ctx->h >> (a->is_yuv && i ? a->d->log2_chroma_h : 0)) * a->ctx->tmp.strides[i]);*/
 		tgt.planes[i] = a->ctx->tmp.planes[i]
 		              + (a->crop[0] >> (a->is_yuv && i ? a->d->log2_chroma_h : 0)) * a->ctx->tmp.strides[i]
-		              + (a->crop[2] >> (a->is_yuv && i ? a->d->log2_chroma_w : 0)) * tgt_pixsteps[i];
+		              + -(-a->crop[2] >> (a->is_yuv && i ? a->d->log2_chroma_w : 0)) * tgt_pixsteps[i];
 		tgt.strides[i] = a->ctx->tmp.strides[i];
 	}
 #else
@@ -544,6 +544,24 @@ void vpdf_image_prepare(
 #endif
 	sws_scale(a->sws, &data, &s, 0, img->h,
 	          tgt.planes, tgt.strides);
+
+	for (unsigned i=0; i<nb_tgt_planes; i++) {
+		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
+		for (unsigned j=0; j<a->ctx->h>>hsh; j++) {
+			int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
+			int l = (-(-a->crop[2] >> wsh)) * tgt_pixsteps[i];
+			memset(a->ctx->tmp.planes[i]     + a->ctx->tmp.strides[i]*j, black[a->is_yuv][i], l);
+			int r = ((a->ctx->w - a->crop[3]) >> wsh) * tgt_pixsteps[i];
+			memset(a->ctx->tmp.planes[i] + r + a->ctx->tmp.strides[i]*j, black[a->is_yuv][i], a->ctx->tmp.strides[i] - r);
+		}
+	}
+
+
+	if (a->ctx->ren_dump_pat)
+		ppm_export(a->ctx->vid_sws, a->ctx->w, a->ctx->h, &a->ctx->tmp,
+		           &a->ctx->vid_ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
+
+
 	a->ctx->tmp_page_idx = page_idx;
 	gettimeofday(&v, NULL);
 	fprintf(stderr, ", tform %s -> %s in %4.1f ms", a->s->name, a->d->name,
@@ -701,22 +719,9 @@ static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, double vid_d
 	if (!fr[0] || !fr[1])
 		DIE(1, "error allocating AVFrame: %s\n", strerror(errno));
 
-	if (ctx->vid_dump_pat) {
-		ctx->vid_sws = tform_sws_context(ctx->w, ctx->h, ctx->pix_fmt, AV_PIX_FMT_RGB24);
-		int r;
-		if ((r = av_image_alloc(ctx->vid_ppm.planes, ctx->vid_ppm.strides,
-		                        ctx->w, ctx->h, AV_PIX_FMT_RGB24, 1)) < 0)
-			DIE(1, "error allocating raw video buffer: %s", fferror(r));
-	}
-
 	for (int frame_idx = 0, last_page = -1;
 	     ff_vinput_read_frame(vin, fr[frame_idx&1], frame_idx); frame_idx++)
 		last_page = decoded_frame(fr, frame_idx, ctx, last_page, vid_diff_ssim);
-
-	if (ctx->vid_sws) {
-		sws_freeContext(ctx->vid_sws);
-		av_freep(ctx->vid_ppm.planes);
-	}
 
 	av_frame_free(fr+0);
 	av_frame_free(fr+1);
@@ -936,10 +941,24 @@ int main(int argc, char **argv)
 	if ((r = av_image_alloc(ctx.tmp.planes, ctx.tmp.strides,
 	                        w, h, vin.vid_ctx->pix_fmt, 1)) < 0)
 		DIE(1, "error allocating raw video buffer: %s", fferror(r));
+
+	if (ctx.vid_dump_pat) {
+		ctx.vid_sws = tform_sws_context(w, h, ctx.pix_fmt, AV_PIX_FMT_RGB24);
+		int r;
+		if ((r = av_image_alloc(ctx.vid_ppm.planes, ctx.vid_ppm.strides,
+		                        w, h, AV_PIX_FMT_RGB24, 1)) < 0)
+			DIE(1, "error allocating raw video buffer: %s", fferror(r));
+	}
+
 	render(&ctx, ren, ren_inst, crop);
 	ren->destroy(ren_inst);
 
 	run_vid_cmp(&vin, &ctx, vid_diff_ssim);
+
+	if (ctx.vid_sws) {
+		sws_freeContext(ctx.vid_sws);
+		av_freep(ctx.vid_ppm.planes);
+	}
 
 	av_freep(ctx.tmp.planes);
 
