@@ -238,7 +238,7 @@ struct cimg {
 };
 
 struct loc_ctx {
-	unsigned w, h;
+	int w, h;
 	struct cimg **buf;
 	struct pimg *pbuf;
 	struct pimg tmp, vid_ppm;
@@ -505,9 +505,7 @@ void vpdf_image_prepare(
 ) {
 	int s = img->s;
 	const uint8_t *data = img->data;
-	unsigned w = a->ctx->w - a->crop[2] - a->crop[3];
 
-	unsigned nb_src_planes = 1;
 	unsigned nb_tgt_planes = 0;
 	for (unsigned i=0; i<4; i++)
 		nb_tgt_planes = MAX(nb_tgt_planes, a->d->comp[i].plane+1);
@@ -520,39 +518,38 @@ void vpdf_image_prepare(
 	        a->ctx->page_from+1, page_idx-a->ctx->page_from,
 	        a->ctx->page_to - a->ctx->page_from,
 	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
-
-	if (0 && a->ctx->ren_dump_pat)
+#if 0
+	unsigned w = a->ctx->w - a->crop[2] - a->crop[3];
+	if (a->ctx->ren_dump_pat)
 		ppm_export(a->sws_ppm, w, a->ctx->h - a->crop[0] - a->crop[1],
 		           &(struct pimg){ { data, }, { img->s, } },
 		           &a->ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
-	*a->u = v;
-#if 0
-	struct pimg tgt = a->ctx->tmp;
-#elif 1
-	struct pimg tgt;
-	for (unsigned i=0; i<nb_tgt_planes; i++) {/*
-		memset(a->ctx->tmp.planes[i], black[a->is_yuv][i],
-		       -(-a->ctx->h >> (a->is_yuv && i ? a->d->log2_chroma_h : 0)) * a->ctx->tmp.strides[i]);*/
-		tgt.planes[i] = a->ctx->tmp.planes[i]
-		              + (a->crop[0] >> (a->is_yuv && i ? a->d->log2_chroma_h : 0)) * a->ctx->tmp.strides[i]
-		              + -(-a->crop[2] >> (a->is_yuv && i ? a->d->log2_chroma_w : 0)) * tgt_pixsteps[i];
-		tgt.strides[i] = a->ctx->tmp.strides[i];
-	}
-#else
-	struct pimg src = { { img->data }, { img->s }, };
-	imgcpy(&src, &src, a->ctx->w, a->ctx->h, a->s, a->crop);
 #endif
-	sws_scale(a->sws, &data, &s, 0, img->h,
-	          tgt.planes, tgt.strides);
+	*a->u = v;
+
+	struct pimg tgt = a->ctx->tmp;
+	for (unsigned i=0; i<nb_tgt_planes; i++) {
+		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
+		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
+		tgt.planes[i] +=  ( a->crop[0] >> hsh) * a->ctx->tmp.strides[i]
+		              +  -(-a->crop[2] >> wsh) * tgt_pixsteps[i];
+	}
+
+	sws_scale(a->sws, &data, &s, 0, img->h, tgt.planes, tgt.strides);
 
 	for (unsigned i=0; i<nb_tgt_planes; i++) {
 		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
-		for (unsigned j=0; j<a->ctx->h>>hsh; j++) {
-			int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
-			int l = (-(-a->crop[2] >> wsh)) * tgt_pixsteps[i];
-			memset(a->ctx->tmp.planes[i]     + a->ctx->tmp.strides[i]*j, black[a->is_yuv][i], l);
-			int r = ((a->ctx->w - a->crop[3]) >> wsh) * tgt_pixsteps[i];
-			memset(a->ctx->tmp.planes[i] + r + a->ctx->tmp.strides[i]*j, black[a->is_yuv][i], a->ctx->tmp.strides[i] - r);
+		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
+		uint8_t *p = a->ctx->tmp.planes[i];
+		for (unsigned j=0; j < -(-a->ctx->h >> hsh); j++, p += a->ctx->tmp.strides[i]) {
+			if (j < a->crop[0] || j >= ((a->ctx->h-a->crop[1]) >> hsh)) {
+				memset(p, black[a->is_yuv][i], a->ctx->tmp.strides[i]);
+			} else {
+				int l = -(           -a->crop[2]  >> wsh) * tgt_pixsteps[i];
+				int r = ((a->ctx->w - a->crop[3]) >> wsh) * tgt_pixsteps[i];
+				memset(p    , black[a->is_yuv][i], l);
+				memset(p + r, black[a->is_yuv][i], a->ctx->tmp.strides[i] - r);
+			}
 		}
 	}
 
