@@ -25,6 +25,10 @@ C_NAMESPACE_BEGIN
 
 #include <lzo/lzo1x.h>
 
+#ifdef HAVE_ZLIB
+# include <zlib.h>
+#endif
+
 /* from ssim/f.c */
 static void plane_psnr(
 	struct cnt2 *c, const u8 *a, const u8 *b,
@@ -133,23 +137,32 @@ static void plane_cmp2_omp(const u8 *_a, const u8 *_b, const unsigned w, const u
 }
 #endif
 
-static void plane_cmp2(const u8 *a, const u8 *b, const unsigned w, const unsigned h, const unsigned stride, struct cnt2 *const c)
-{
-	unsigned i, j;
-	u32 mean, _mse;
-	s64 s2, cv;
+#define PLANE_CMP2_SSIM	(1 << 0)
+#define PLANE_CMP2_PSNR	(1 << 1)
 
-	for (j=0; j<h; j+=8, a += 8*stride, b += 8*stride)
-		for (i=0; i<w; i+=8) {
-			mu_var_2x8x8_2(a + i, b + i, stride, &mean, &s2);
-			#if 1
-			covar_2(a + i, b + i, stride, &mean, &cv);
-			mse(a + i, b + i, stride, &_mse);
-			#else
-			covar_3(a + i, b + i, stride, &mean, &cv);
-			_mse = cv >> 32;
-			cv = (s32)cv;
-			#endif
+static void plane_cmp2(
+	const u8 *a, const u8 *b,
+	const unsigned w, const unsigned h, const unsigned stride,
+	struct cnt2 *const c, unsigned flags
+) {
+	u32 mean = 0, _mse = 0;
+	s64 s2 = 0, cv = 0;
+	for (unsigned j=0; j<h; j+=8, a += 8*stride, b += 8*stride)
+		for (unsigned i=0; i<w; i+=8) {
+			if (flags & PLANE_CMP2_SSIM)
+				mu_var_2x8x8_2(a + i, b + i, stride, &mean, &s2);
+#if 1
+			if (flags & PLANE_CMP2_SSIM)
+				covar_2(a + i, b + i, stride, &mean, &cv);
+			if (flags & PLANE_CMP2_PSNR)
+				mse(a + i, b + i, stride, &_mse);
+#else
+			if (flags & (PLANE_CMP2_SSIM | PLANE_CMP2_PSNR)) {
+				covar_3(a + i, b + i, stride, &mean, &cv);
+				_mse = cv >> 32;
+				cv = (s32)cv;
+			}
+#endif
 			cnt2_done(c, mean, cv, s2, _mse);
 		}
 }
@@ -165,7 +178,7 @@ static void get_cnt2(const struct cnt2 *c, double div, double *_ssim, double *_p
 	double ds21 = c->s21 / (div * 64);
 
 	double c1, c2;
-	double k1 = .01, k2 = .03;
+	double k1 = VPDF_SYNC_SSIM_K1, k2 = VPDF_SYNC_SSIM_K2;
 	double L;
 	L = 255;
 	c1 = k1 * L;
@@ -213,7 +226,8 @@ static void frame_cmp(const AVFrame *ref, const struct pimg *ren, double *ssim, 
 		unsigned w = ref->width  >> (i ? d->log2_chroma_w : 0);
 		unsigned h = ref->height >> (i ? d->log2_chroma_h : 0);
 		num += w * h;
-		plane_cmp2(ref->data[i], ren->planes[i], w, h, ref->linesize[i], &c);
+		plane_cmp2(ref->data[i], ren->planes[i], w, h, ref->linesize[i],
+		           &c, PLANE_CMP2_SSIM | PLANE_CMP2_PSNR);
 	}
 	get_cnt2(&c, num, ssim, psnr);
 }
@@ -227,13 +241,16 @@ struct loc_ctx {
 	unsigned w, h;
 	struct cimg **buf;
 	struct pimg *pbuf;
-	struct pimg tmp;
+	struct pimg tmp, vid_ppm;
+	struct SwsContext *vid_sws;
 	int tmp_page_idx;
 	int page_from, page_to;
 	enum AVPixelFormat pix_fmt;
-	const char *dump_pat;
+	const char *ren_dump_pat;
+	const char *vid_dump_pat;
 	unsigned compress : 1;
 };
+
 /*
 static void pimg_swap(struct pimg *a, struct pimg *b)
 {
@@ -280,9 +297,9 @@ static struct res * res_list_sorted_insert(struct res *r, const struct res *c, u
 }
 
 #ifdef _OPENMP
-//#include <omp.h>
+#include <omp.h>
 
-static void locate_omp(
+static void locate(
 	const AVFrame *const ref, const struct loc_ctx *const ctx,
 	int last_page, const unsigned n_best, struct res r[static n_best]
 ) {
@@ -291,7 +308,7 @@ static void locate_omp(
 	struct res c;
 	for (unsigned i=0; i<n_best; i++)
 		r[i] = (struct res)RES_INIT;
-#pragma omp parallel private(rr,tmp_img,c)
+#pragma omp parallel private(rr,tmp_img,c) shared(r)
 	{
 		memcpy(rr, r, sizeof(*r)*n_best);
 		int ret;
@@ -313,9 +330,8 @@ static void locate_omp(
 		}
 	}
 }
-#endif
-
-static void locate_single(
+#else
+static void locate(
 	const AVFrame *ref, const struct loc_ctx *ctx,
 	int last_page, unsigned n_best, struct res r[static n_best]
 ) {
@@ -338,35 +354,81 @@ static void locate_single(
 		}
 	}
 }
+#endif
 
-typedef void locate_f(const AVFrame *, const struct loc_ctx *,
-                      int, unsigned, struct res r[*]);
+static void ppm_export(
+	struct SwsContext *ppm_sws, unsigned w, unsigned h,
+	const struct pimg *src, const struct pimg *tmp, const char *path_fmt,
+	...
+) {
+	sws_scale(ppm_sws, (const uint8_t *const *)src->planes, src->strides,
+	          0, h, tmp->planes, tmp->strides);
+
+	va_list ap;
+	va_start(ap, path_fmt);
+	int len = vsnprintf(NULL, 0, path_fmt, ap);
+	va_end(ap);
+	char buf[len+3+1];
+	va_start(ap, path_fmt);
+	vsnprintf(buf, sizeof(buf), path_fmt, ap);
+	va_end(ap);
+
+#ifdef HAVE_ZLIB
+# define FFILE			gzFile
+# define FOPEN(path,mode)	gzopen(path,mode)
+# define FPRINTF(file,fmt,...)	gzprintf(file,fmt,__VA_ARGS__)
+# define FWRITE(file,buf,sz)	gzwrite(file,buf,sz)
+# define FCLOSE(file)		gzclose(file)
+	strcat(buf, ".gz");
+#else
+# define FFILE			FILE *
+# define FOPEN(path,mode)	fopen(path,mode)
+# define FPRINTF(file,fmt,...)	fprintf(file,fmt,__VA_ARGS__)
+# define FWRITE(file,buf,sz)	fwrite(buf,sz,1,file)
+# define FCLOSE(file)		fclose(file)
+#endif
+	FFILE f = FOPEN(buf, "wb");
+	FPRINTF(f, "P6 %u %u 255\n", w, h);
+	unsigned char *d = tmp->planes[0];
+	for (unsigned i=0; i<h; i++, d += tmp->strides[0])
+		FWRITE(f, d, 3*w);
+	FCLOSE(f);
+}
 
 static int decoded_frame(
 	AVFrame *fr[static 2], int frame_idx, const struct loc_ctx *ctx,
-	int last_page, locate_f *locate, double vid_diff_ssim
+	int last_page, double vid_diff_ssim
 ) {
 	struct res r[VPDF_SYNC_N_BEST_MATCHES] = { RES_INIT };
-	assert(fr[frame_idx&1]->format == ctx->pix_fmt);
+	const AVFrame *f0 = fr[frame_idx&1], *f1 = fr[1-(frame_idx&1)];
+	assert(f0->format == ctx->pix_fmt);
 	if (frame_idx) {
 		struct pimg n;
-		memcpy(n.planes, fr[frame_idx&1]->data, sizeof(n.planes));
-		memcpy(n.strides, fr[frame_idx&1]->linesize, sizeof(n.strides));
-		frame_cmp(fr[1-(frame_idx&1)], &n, &r->ssim, &r->psnr);
+		memcpy(n.planes, f0->data, sizeof(n.planes));
+		memcpy(n.strides, f0->linesize, sizeof(n.strides));
+		frame_cmp(f1, &n, &r->ssim, &r->psnr);
 		if (r->ssim >= vid_diff_ssim)
 			r->page_idx = last_page;
 	}
 	fprintf(stderr, "frame %5d cmp-to-prev: %6.4f %7.3f ",
 	        frame_idx, r->ssim, r->psnr);
 	if (r->page_idx < 0) {
-		locate(fr[frame_idx&1], ctx, last_page, ARRAY_SIZE(r), r);
+		locate(f0, ctx, last_page, ARRAY_SIZE(r), r);
 		fprintf(stderr, "located ");
+		if (ctx->vid_dump_pat) {
+			struct pimg src;
+			memcpy(src.planes, f0->data, sizeof(src.planes));
+			memcpy(src.strides, f0->linesize, sizeof(src.strides));
+			ppm_export(ctx->vid_sws, ctx->w, ctx->h,
+			           &src, &ctx->vid_ppm, ctx->vid_dump_pat,
+			           r->page_idx+1, frame_idx, r->ssim);
+		}
 	} else if (ctx->tmp_page_idx != r->page_idx) {
-		frame_render_cmp(fr[frame_idx&1], ctx, r->page_idx, &ctx->tmp, &r->ssim, &r->psnr);
+		frame_render_cmp(f0, ctx, r->page_idx, &ctx->tmp, &r->ssim, &r->psnr);
 		((struct loc_ctx *)ctx)->tmp_page_idx = r->page_idx;
 		fprintf(stderr, "reused  ");
 	} else {
-		frame_cmp(fr[frame_idx&1], &ctx->tmp, &r->ssim, &r->psnr);
+		frame_cmp(f0, &ctx->tmp, &r->ssim, &r->psnr);
 		fprintf(stderr, "reused0 ");
 	}
 	fprintf(stderr, "cmp-to-page:");
@@ -383,7 +445,9 @@ struct img_prep_args {
 	struct SwsContext *sws, *sws_ppm;
 	struct pimg        ppm;
 	struct loc_ctx    *ctx;
+	const AVPixFmtDescriptor *s;
 	const AVPixFmtDescriptor *d;
+	const int         *crop;
 	int is_yuv;
 	struct timeval    *u;
 	/* for LZO compression */
@@ -391,31 +455,98 @@ struct img_prep_args {
 	uint8_t           *wrkmem;
 };
 
+static const uint8_t black[][4] = { { 0,0,0,0 }, { 0x10,0x80,0x80,0x00 }, };
+#if 0
+struct pix_desc {
+	unsigned nb_planes;
+	int w_rsh[4], h_rsh[4];
+};
+
+static void imgcpy(
+	const struct pimg *tgt, const struct pimg *src, int w, int h,
+	const AVPixFmtDescriptor *d, const int crop[static 4]
+) {
+	int is_yuv = d->nb_components < 3 || ~d->flags & AV_PIX_FMT_FLAG_RGB;
+	void * (*cpy)(void *, const void *, size_t);
+	cpy = src->planes[0] == tgt->planes[0] ? memmove : memcpy;
+
+	unsigned nb_planes = 0;
+	for (unsigned i=0; i<d->nb_components; i++)
+		nb_planes = MAX(nb_planes, d->comp[i].plane+1);
+
+	int cw = w - crop[2] - crop[3];
+	int ch = h - crop[0] - crop[1];
+
+	for (unsigned p=0; p<nb_planes; p++) {
+		const AVComponentDescriptor *c = d->comp+i;
+		int step   = c->step_minus1+1;
+		int ss     = src->strides[p];
+		int ts     = tgt->strides[p];
+		int w_rsh  = (p == 1 || p == 2) ? d->log2_chroma_w : 0;
+		int h_rsh  = (p == 1 || p == 2) ? d->log2_chroma_h : 0;
+		int rows   = -(-ch >> h_rsh);
+		int cols   = -(-cw >> w_rsh);
+		uint8_t *s = src->planes[p]
+		           + (crop[0] >> h_rsh)*ss
+		           + (crop[2] >> w_rsh)*step;
+		uint8_t *t = tgt->planes[p];
+		unsigned n = cols * step;
+		for (unsigned j=0; j<rows; j++, s += ss, t += ts) {
+			cpy(t, s, n);
+			memset(t+n, black[is_yuv][p], ts-n);
+		}
+		memset(t, black[is_yuv][p], ts*(-(-h >> h_rsh)-rows));
+	}
+}
+#endif
+
 void vpdf_image_prepare(
 	struct vpdf_image *img, const struct img_prep_args *a, unsigned page_idx
 ) {
 	int s = img->s;
-	const uint8_t *data[4] = { img->data, NULL, NULL, NULL };
+	const uint8_t *data = img->data;
+	unsigned w = a->ctx->w - a->crop[2] - a->crop[3];
 
-	if (a->ctx->dump_pat) {
-		sws_scale(a->sws_ppm, data, &s, 0, a->ctx->h, a->ppm.planes, a->ppm.strides);
-		int len = snprintf(NULL, 0, a->ctx->dump_pat, page_idx);
-		char buf[len+1];
-		snprintf(buf, sizeof(buf), a->ctx->dump_pat, page_idx);
-		FILE *f = fopen(buf, "w");
-		fprintf(f, "P6 %u %u 255\n", a->ctx->w, a->ctx->h);
-		unsigned char *d = a->ppm.planes[0];
-		for (unsigned i=0; i < a->ctx->h; i++, d += a->ppm.strides[0])
-			fwrite(d, a->ctx->w, 3, f);
-		fclose(f);
-	}
-	sws_scale(a->sws, data, &s, 0, img->h, a->ctx->tmp.planes, a->ctx->tmp.strides);
-	a->ctx->tmp_page_idx = page_idx;
+	unsigned nb_src_planes = 1;
+	unsigned nb_tgt_planes = 0;
+	for (unsigned i=0; i<4; i++)
+		nb_tgt_planes = MAX(nb_tgt_planes, a->d->comp[i].plane+1);
+	int tgt_pixsteps[4];
+	av_image_fill_max_pixsteps(tgt_pixsteps, NULL, a->d);
 
 	struct timeval v;
 	gettimeofday(&v, NULL);
-	fprintf(stderr, "rendered page %4d/%4d in %4.1f ms",
-	        page_idx+1, a->ctx->page_to - a->ctx->page_from,
+	fprintf(stderr, "rendered page %4d+%4d/%4d in %5.1f ms",
+	        a->ctx->page_from+1, page_idx-a->ctx->page_from,
+	        a->ctx->page_to - a->ctx->page_from,
+	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
+
+	if (a->ctx->ren_dump_pat)
+		ppm_export(a->sws_ppm, w, a->ctx->h - a->crop[0] - a->crop[1],
+		           &(struct pimg){ { data, }, { img->s, } },
+		           &a->ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
+	*a->u = v;
+#if 0
+	struct pimg tgt = a->ctx->tmp;
+#elif 1
+	struct pimg tgt;
+	for (unsigned i=0; i<4; i++) {
+		memset(a->ctx->tmp.planes[i], a->is_yuv ? i ? 0x80 : 0x10 : 0x00,
+		       -(-a->ctx->h >> (a->is_yuv && i ? a->d->log2_chroma_h : 0)) * a->ctx->tmp.strides[i]);
+		tgt.planes[i] = a->ctx->tmp.planes[i]
+		              + (a->crop[0] >> (a->is_yuv && i ? a->d->log2_chroma_h : 0)) * a->ctx->tmp.strides[i]
+		              + (a->crop[2] >> (a->is_yuv && i ? a->d->log2_chroma_w : 0)) * tgt_pixsteps[i];
+		tgt.strides[i] = a->ctx->tmp.strides[i];
+	}
+#else
+	struct pimg src = { { img->data }, { img->s }, };
+	imgcpy(&src, &src, a->ctx->w, a->ctx->h, a->s, a->crop);
+#endif
+	sws_scale(a->sws, &data, &s, 0, img->h,
+	          tgt.planes, tgt.strides);
+	a->ctx->tmp_page_idx = page_idx;
+	gettimeofday(&v, NULL);
+	fprintf(stderr, ", tform %s -> %s in %4.1f ms", a->s->name, a->d->name,
 	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
 
 	/* LZO compress */
@@ -435,9 +566,9 @@ void vpdf_image_prepare(
 		k += kj[j];
 	}
 	gettimeofday(&v, NULL);
-	fprintf(stderr, ", compressed in %4.0f us: %u -> %u bytes\t-> %5.1f%%\n",
+	fprintf(stderr, ", compressed in %4.0f us: %u -> %*u bytes (%5.1f%%)\n",
 		(v.tv_sec-a->u->tv_sec)*1e6+(v.tv_usec-a->u->tv_usec),
-		sz, k, 100.0*k/sz);
+		sz, snprintf(NULL, 0, "%u", sz), k, 100.0*k/sz);
 	struct cimg *c = malloc(offsetof(struct cimg,data)+k);
 	for (unsigned j=0; j<a->d->nb_components; j++)
 		c->lens[j] = kj[j];
@@ -447,22 +578,27 @@ void vpdf_image_prepare(
 	gettimeofday(a->u, NULL);
 }
 
+static struct SwsContext * tform_sws_context(
+	unsigned w, unsigned h, enum AVPixelFormat from, enum AVPixelFormat to
+) {
+	return sws_getContext(w, h, from, w, h, to, 0, NULL, NULL, NULL);
+}
+
 static void render(
-	struct loc_ctx *ctx, struct vpdf_ren *ren, void *ren_inst
+	struct loc_ctx *ctx, struct vpdf_ren *ren, void *ren_inst,
+	const int crop[static 4]
 ) {
 	struct img_prep_args a;
 	uint8_t compressed_buf[4*ctx->w*ctx->h*2];
 	uint8_t wrkmem[LZO1X_1_15_MEM_COMPRESS];
 	struct timeval u;
 
-	a.sws = sws_getContext(ctx->w, ctx->h, ren->fmt,
-	                       ctx->w, ctx->h, ctx->pix_fmt,
-	                       0, NULL, NULL, NULL);
+	a.sws = tform_sws_context(ctx->w - crop[2] - crop[3],
+	                          ctx->h - crop[0] - crop[1],
+	                          ren->fmt, ctx->pix_fmt);
 	a.sws_ppm = NULL;
-	if (ctx->dump_pat) {
-		a.sws_ppm = sws_getContext(ctx->w, ctx->h, ren->fmt,
-		                           ctx->w, ctx->h, AV_PIX_FMT_RGB24,
-		                           0, NULL, NULL, NULL);
+	if (ctx->ren_dump_pat) {
+		a.sws_ppm = tform_sws_context(ctx->w, ctx->h, ren->fmt, AV_PIX_FMT_RGB24);
 		int r;
 		if ((r = av_image_alloc(a.ppm.planes, a.ppm.strides,
 		                        ctx->w, ctx->h, AV_PIX_FMT_RGB24, 1)) < 0)
@@ -471,8 +607,10 @@ static void render(
 	a.ctx = ctx;
 	a.compressed_buf = compressed_buf;
 	a.wrkmem = wrkmem;
+	a.crop = crop;
+	a.s = av_pix_fmt_desc_get(ren->fmt);
 	a.d = av_pix_fmt_desc_get(ctx->pix_fmt);
-	a.is_yuv = a.d->nb_components < 2 || ~a.d->flags & AV_PIX_FMT_FLAG_RGB;
+	a.is_yuv = a.d->nb_components < 3 || ~a.d->flags & AV_PIX_FMT_FLAG_RGB;
 	a.u = &u;
 
 	if (a.d->flags & AV_PIX_FMT_FLAG_PAL)
@@ -557,6 +695,33 @@ static int ff_vinput_read_frame(struct ff_vinput *ff, AVFrame *fr, int frame_idx
 	return 0;
 }
 
+static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, double vid_diff_ssim)
+{
+	AVFrame *fr[2] = { av_frame_alloc(), av_frame_alloc(), };
+	if (!fr[0] || !fr[1])
+		DIE(1, "error allocating AVFrame: %s\n", strerror(errno));
+
+	if (ctx->vid_dump_pat) {
+		ctx->vid_sws = tform_sws_context(ctx->w, ctx->h, ctx->pix_fmt, AV_PIX_FMT_RGB24);
+		int r;
+		if ((r = av_image_alloc(ctx->vid_ppm.planes, ctx->vid_ppm.strides,
+		                        ctx->w, ctx->h, AV_PIX_FMT_RGB24, 1)) < 0)
+			DIE(1, "error allocating raw video buffer: %s", fferror(r));
+	}
+
+	for (int frame_idx = 0, last_page = -1;
+	     ff_vinput_read_frame(vin, fr[frame_idx&1], frame_idx); frame_idx++)
+		last_page = decoded_frame(fr, frame_idx, ctx, last_page, vid_diff_ssim);
+
+	if (ctx->vid_sws) {
+		sws_freeContext(ctx->vid_sws);
+		av_freep(ctx->vid_ppm.planes);
+	}
+
+	av_frame_free(fr+0);
+	av_frame_free(fr+1);
+}
+
 static void ff_vinput_close(struct ff_vinput *ff)
 {
 	av_packet_unref(&ff->pkt);
@@ -573,13 +738,13 @@ static struct {
 	struct vpdf_ren *r;
 } const renderers[] = {
 #ifdef HAVE_POPPLER_GLIB
-	{ "poppler-glib", &vpdf_ren_poppler_glib, },
+	{ "poppler-cairo" , &vpdf_ren_poppler_glib, },
 #endif
 #ifdef HAVE_POPPLER_CPP
-	{ "poppler-c++" , &vpdf_ren_poppler_cpp , },
+	{ "poppler-splash", &vpdf_ren_poppler_cpp , },
 #endif
 #ifdef HAVE_GS
-	{ "gs"          , &vpdf_ren_gs          , },
+	{ "ghostscript"   , &vpdf_ren_gs          , },
 #endif
 };
 
@@ -589,24 +754,20 @@ static void usage(const char *progname)
 	printf("\n");
 	printf("\
 Options [defaults]:\n\
-  -c           toggle compare luma plane only [%s]\n\
+  -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]\n\
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [%g]\n\
-  -D DIR       dump rendered images into DIR\n\
+  -D DIR       dump rendered images into DIR (named PAGE-REN.ppm)\n\
   -f PG_FROM   page interval start (inclusive) [0]\n\
   -h           display this help message\n\
-  -l IMPL_ID   select implementation for locate: [single]%s\n\
   -r REN       use REN to render PDF [%s]\n\
   -t PG_TO     page interval stop (exclusive) [page-num]\n\
   -u           don't compress pages (watch out for OOM)\n\
+  -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM.ppm)\n\
+  -y           toggle compare luma plane only [%s]\n\
 ",
-	       frame_cmp_luma_only ? "yes" : "no",
 	       VPDF_SYNC_VID_DIFF_SSIM,
-#ifdef _OPENMP
-	       " omp",
-#else
-	       "",
-#endif
-	       renderers[0].id);
+	       renderers[0].id,
+	       frame_cmp_luma_only ? "yes" : "no");
 
 	for (unsigned i=0; i<ARRAY_SIZE(renderers); i++) {
 		printf("\n");
@@ -636,20 +797,26 @@ Options [defaults]:\n\
 int main(int argc, char **argv)
 {
 	char *ren_id = NULL;
-	locate_f *locate = locate_single;
 	char *endptr;
 	double vid_diff_ssim = VPDF_SYNC_VID_DIFF_SSIM;
-	char *dump_dir = NULL;
+	char *ren_dump_dir = NULL;
+	char *vid_dump_dir = NULL;
+	int crop[4] = {0,0,0,0};
 
 	int page_from = 0;
 	int page_to   = -1;
 	int compress  = 1;
 	int opt;
 	struct stat st;
-	while ((opt = getopt(argc, argv, ":cd:D:f:hl:r:t:u")) != -1)
+	while ((opt = getopt(argc, argv, ":C:d:D:f:hr:t:uV:y")) != -1)
 		switch (opt) {
-		case 'c':
-			frame_cmp_luma_only = !frame_cmp_luma_only;
+		case 'C':
+			endptr = optarg;
+			for (unsigned i=0; i<ARRAY_SIZE(crop); i++) {
+				crop[i] = strtol(endptr, &endptr, 10);
+				if (*endptr++ != (i == 3 ? '\0' : ':'))
+					DIE(1, "option -C expects format to be T:B:L:R\n");
+			}
 			break;
 		case 'd':
 			vid_diff_ssim = strtof(optarg, &endptr);
@@ -657,7 +824,7 @@ int main(int argc, char **argv)
 				DIE(1, "expected float parameter for option '-d'\n");
 			break;
 		case 'D':
-			if (stat(dump_dir = optarg, &st) != 0)
+			if (stat(ren_dump_dir = optarg, &st) != 0)
 				DIE(1, "unable to stat() '%s': %s\n", optarg, strerror(errno));
 			if (!S_ISDIR(st.st_mode))
 				DIE(1, "option -D expects path to a directory, '%s' is none\n", optarg);
@@ -670,14 +837,6 @@ int main(int argc, char **argv)
 		case 'h':
 			usage(argv[0]);
 			exit(0);
-		case 'l':
-			if (!strcmp(optarg, "single")) locate = locate_single;
-#ifdef _OPENMP
-			else if (!strcmp(optarg, "omp")) locate = locate_omp;
-#endif
-			else
-				DIE(1, "unrecognized implementation identifier for '-l'\n");
-			break;
 		case 'r':
 			ren_id = optarg;
 			break;
@@ -687,6 +846,15 @@ int main(int argc, char **argv)
 				DIE(1, "expected decimal parameter for option '-t'\n");
 			break;
 		case 'u': compress = 0; break;
+		case 'V':
+			if (stat(vid_dump_dir = optarg, &st) != 0)
+				DIE(1, "unable to stat() '%s': %s\n", optarg, strerror(errno));
+			if (!S_ISDIR(st.st_mode))
+				DIE(1, "option -V expects path to a directory, '%s' is none\n", optarg);
+			break;
+		case 'y':
+			frame_cmp_luma_only = !frame_cmp_luma_only;
+			break;
 		case ':':
 			DIE(1, "error: option '-%c' required a parameter\n",
 			    optopt);
@@ -733,42 +901,46 @@ int main(int argc, char **argv)
 
 	unsigned w = vin.vid_ctx->width;
 	unsigned h = vin.vid_ctx->height;
-	if (w & 0xf || h & 0xf)
-		DIE(1, "error: SSIM/PSNR computation only works for VID width "
-		       "and height being multiples of 16\n");
+	if ((w|h) & (0xf >> (frame_cmp_luma_only ? 1 : 0)))
+		DIE(1, "error: SSIM/PSNR computation only works for VID planes "
+		       "being dimensioned as multiples of 8\n");
 
-	void *ren_inst = ren->create(argc, argv, w, h);
+	void *ren_inst = ren->create(argc, argv, w-crop[2]-crop[3], h-crop[0]-crop[1]);
+	if (!ren_inst)
+		DIE(1, "error creating renderer '%s': check its params\n", ren_id);
 	unsigned n_pages = ren->n_pages(ren_inst);
 
-#define VPDF_SYNC_DUMP_PAT_PAT	"%s/%s-%%04d.ppm"
-	int len = snprintf(NULL, 0, VPDF_SYNC_DUMP_PAT_PAT, dump_dir, ren_id);
-	char dump_pat_buf[len+1];
-	snprintf(dump_pat_buf, sizeof(dump_pat_buf), VPDF_SYNC_DUMP_PAT_PAT, dump_dir, ren_id);
+#define VPDF_SYNC_REN_DUMP_PAT_PAT	"%s/%%04d-%s.ppm"
+	int len = snprintf(NULL, 0, VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, ren_id);
+	char ren_dump_pat_buf[len+1];
+	snprintf(ren_dump_pat_buf, sizeof(ren_dump_pat_buf),
+	         VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, ren_id);
+
+#define VPDF_SYNC_VID_DUMP_PAT_PAT	"%s/%%04d-%%05d-%%6.4f.ppm"
+	len = snprintf(NULL, 0, VPDF_SYNC_VID_DUMP_PAT_PAT, vid_dump_dir);
+	char vid_dump_pat_buf[len+1];
+	len = snprintf(vid_dump_pat_buf, sizeof(vid_dump_pat_buf),
+	               VPDF_SYNC_VID_DUMP_PAT_PAT, vid_dump_dir);
 
 	if (page_to < 0 || page_to > n_pages)
 		page_to = n_pages;
 	n_pages = page_to - page_from;
 	struct cimg *imgs[n_pages];
 	struct loc_ctx ctx = {
-		w, h, imgs, NULL, PIMG_INIT, -1, page_from, page_to,
-		vin.vid_ctx->pix_fmt, dump_dir ? dump_pat_buf : NULL, compress,
+		w, h, imgs, NULL, PIMG_INIT, PIMG_INIT, NULL,
+		-1, page_from, page_to, vin.vid_ctx->pix_fmt,
+		ren_dump_dir ? ren_dump_pat_buf : NULL,
+		vid_dump_dir ? vid_dump_pat_buf : NULL,
+		compress,
 	};
 	if ((r = av_image_alloc(ctx.tmp.planes, ctx.tmp.strides,
 	                        w, h, vin.vid_ctx->pix_fmt, 1)) < 0)
 		DIE(1, "error allocating raw video buffer: %s", fferror(r));
-	render(&ctx, ren, ren_inst);
+	render(&ctx, ren, ren_inst, crop);
 	ren->destroy(ren_inst);
 
-	AVFrame *fr[2] = { av_frame_alloc(), av_frame_alloc(), };
-	if (!fr[0] || !fr[1])
-		DIE(1, "error allocating AVFrame: %s\n", strerror(errno));
+	run_vid_cmp(&vin, &ctx, vid_diff_ssim);
 
-	for (int frame_idx = 0, last_page = -1;
-	     ff_vinput_read_frame(&vin, fr[frame_idx&1], frame_idx); frame_idx++)
-		last_page = decoded_frame(fr, frame_idx, &ctx, last_page, locate, vid_diff_ssim);
-
-	av_frame_free(fr+0);
-	av_frame_free(fr+1);
 	av_freep(ctx.tmp.planes);
 
 	for (unsigned i=0; i<ARRAY_SIZE(imgs); i++)

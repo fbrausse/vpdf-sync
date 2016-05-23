@@ -28,13 +28,12 @@ struct poppler_cpp_ren {
 	document *pdf;
 	page_renderer r;
 	unsigned w, h;
+	bool keep_aspect;
 
-	poppler_cpp_ren(document *pdf, unsigned w, unsigned h) noexcept
-	: pdf(pdf), w(w), h(h)
+	poppler_cpp_ren(document *pdf, unsigned w, unsigned h, bool keep_aspect, int hints) noexcept
+	: pdf(pdf), w(w), h(h), keep_aspect(keep_aspect)
 	{
-		r.set_render_hints(page_renderer::antialiasing |
-		                   page_renderer::text_antialiasing |
-		                   page_renderer::text_hinting);
+		r.set_render_hints(hints);
 	}
 };
 
@@ -57,16 +56,28 @@ extern struct vpdf_ren vpdf_ren_poppler_cpp;
 
 static void * create(int argc, char **argv, unsigned w, unsigned h)
 {
+	int hints = page_renderer::antialiasing
+	          | page_renderer::text_antialiasing
+	          | page_renderer::text_hinting;
+	bool keep_aspect = true;
 	std::string password;
 	int opt;
-	while ((opt = getopt(argc, argv, ":hk:")) != -1)
+	while ((opt = getopt(argc, argv, ":ahk:stT")) != -1)
 		switch (opt) {
-		case 'k': password = optarg; break;
+		case 'a': hints &= ~page_renderer::antialiasing; break;
 		case 'h':
-			printf("Renderer '%s' [can render: %s] usage: [-k PASSWD] [--] PDF-PATH\n",
+			printf("Renderer '%s' [can render: %s] usage: [-k PASSWD] [-astT] [--] PDF-PATH\n",
 			       argv[0], vpdf_ren_poppler_cpp.can_render ? "yes" : "no");
+			printf("  -a           disable graphics anti-aliasing\n");
 			printf("  -k PASSWD    use PASSWD to open protected PDF [(unset)]\n");
+			printf("  -s           disable preservation of aspect ratio\n");
+			printf("  -t           disable text anti-aliasing\n");
+			printf("  -T           disable text hinting\n");
 			return NULL;
+		case 'k': password = optarg; break;
+		case 's': keep_aspect = false; break;
+		case 't': hints &= ~page_renderer::text_antialiasing; break;
+		case 'T': hints &= ~page_renderer::text_hinting; break;
 		case ':':
 			DIE(1, "%s error: option '-%c' required a parameter\n",
 			    argv[0], optopt);
@@ -85,7 +96,7 @@ static void * create(int argc, char **argv, unsigned w, unsigned h)
 	if (!pdf)
 		DIE(1, "error opening PDF");
 
-	return new poppler_cpp_ren(pdf, w, h);
+	return new poppler_cpp_ren(pdf, w, h, keep_aspect, hints);
 }
 
 static void render(void *_ren, int page_from, int page_to, const struct img_prep_args *img_prep_args)
@@ -96,13 +107,18 @@ static void render(void *_ren, int page_from, int page_to, const struct img_prep
 		page *p = ren->pdf->create_page(page_idx);
 		rectf r = p->page_rect();
 
-		double wa = ren->w / r.width();     /* horizontal scale */
-		double ha = ren->h / r.height();    /* vertical scale */
-		double a = MIN(wa, ha); /* uniform scale = min of both */
+		double wa = ren->w / r.width(); /* horizontal scale */
+		double ha = ren->h / r.height();/* vertical scale */
+		if (ren->keep_aspect) {
+			double a = MIN(wa, ha); /* uniform scale = min of both */
+			wa = a;
+			ha = a;
+		}
 
-		image pi = ren->r.render_page(p, POPPLER_CPP_DPI*a, POPPLER_CPP_DPI*a,
-					      MAX(r.width() * a, 0) / 2,
-					      MAX(r.height() * a, 0) / 2);
+		image pi = ren->r.render_page(p, POPPLER_CPP_DPI*wa,
+		                                 POPPLER_CPP_DPI*ha,
+		                              MAX(r.width() * wa, 0) / 2,
+		                              MAX(r.height() * ha, 0) / 2);
 		delete p;
 		struct vpdf_image img = {
 			(unsigned char *)pi.const_data(),
