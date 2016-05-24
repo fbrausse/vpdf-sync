@@ -54,6 +54,8 @@ static void destroy(void *_ren)
 
 extern struct vpdf_ren vpdf_ren_poppler_cpp;
 
+#define USAGE	"[-k PASSWD] [-astT] [--] PDF-PATH"
+
 static void * create(int argc, char **argv, unsigned w, unsigned h)
 {
 	int hints = page_renderer::antialiasing
@@ -66,7 +68,7 @@ static void * create(int argc, char **argv, unsigned w, unsigned h)
 		switch (opt) {
 		case 'a': hints &= ~page_renderer::antialiasing; break;
 		case 'h':
-			printf("Renderer '%s' [can render: %s] usage: [-k PASSWD] [-astT] [--] PDF-PATH\n",
+			printf("Renderer '%s' [can render: %s] usage: " USAGE "\n",
 			       argv[0], vpdf_ren_poppler_cpp.can_render ? "yes" : "no");
 			printf("  -a           disable graphics anti-aliasing\n");
 			printf("  -k PASSWD    use PASSWD to open protected PDF [(unset)]\n");
@@ -88,7 +90,7 @@ static void * create(int argc, char **argv, unsigned w, unsigned h)
 		}
 
 	if (argc - optind != 1)
-		DIE(1, "%s renderer usage: [-k PASSWD] PDF\n", argv[0]);
+		DIE(1, "%s renderer usage: " USAGE "\n", argv[0]);
 
 	const char *pdf_path = argv[optind++];
 
@@ -99,10 +101,14 @@ static void * create(int argc, char **argv, unsigned w, unsigned h)
 	return new poppler_cpp_ren(pdf, w, h, keep_aspect, hints);
 }
 
-static void render(void *_ren, int page_from, int page_to, const struct img_prep_args *img_prep_args)
-{
-	poppler_cpp_ren *ren = (poppler_cpp_ren *)_ren;
-
+static void render(
+	void *const _ren, const int page_from, const int page_to,
+	const struct img_prep_args *const img_prep_args
+) {
+	const poppler_cpp_ren *const ren = (poppler_cpp_ren *)_ren;
+#ifdef _OPENMP
+# pragma omp parallel for
+#endif
 	for (int page_idx = page_from; page_idx < page_to; page_idx++) {
 		page *p = ren->pdf->create_page(page_idx);
 		rectf r = p->page_rect();
@@ -125,6 +131,9 @@ static void render(void *_ren, int page_from, int page_to, const struct img_prep
 			(unsigned)pi.width(), (unsigned)pi.height(),
 			(unsigned)pi.bytes_per_row()
 		};
+#ifdef _OPENMP
+# pragma omp critical
+#endif
 		vpdf_image_prepare(&img, img_prep_args, page_idx);
 	}
 }

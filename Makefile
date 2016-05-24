@@ -6,6 +6,7 @@ override CPPFLAGS += -DHAVE_POPPLER_GLIB
 PDF_SRCS += poppler-pdf-cpp.cc
 PDF_PKGS += poppler-cpp
 override CPPFLAGS += -DHAVE_POPPLER_CPP
+poppler-pdf-cpp.o: CXXFLAGS += -fopenmp
 
 PDF_SRCS += gs.c
 PDF_PKGS +=
