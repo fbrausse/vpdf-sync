@@ -18,6 +18,9 @@ PKGS  = libavformat libavcodec libswscale libavutil
 PKGS += zlib
 override CPPFLAGS += -DHAVE_ZLIB
 
+override LDLIBS   += -llzo2
+override CPPFLAGS += -DHAVE_LZO
+
 WARN_FLAGS = -Wall -Wno-unused-function
 
 CC := $(CC) -std=c11
@@ -26,7 +29,6 @@ CFLAGS   = -O2 $(WARN_FLAGS)
 CXXFLAGS = $(CFLAGS)
 #CPPFLAGS = -DNDEBUG
 override LDFLAGS = $(CFLAGS) -Wl,--as-needed
-override LDLIBS  += -llzo2
 
 override CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 
