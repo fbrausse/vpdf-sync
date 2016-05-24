@@ -232,10 +232,28 @@ static void frame_cmp(const AVFrame *ref, const struct pimg *ren, double *ssim, 
 	get_cnt2(&c, num, ssim, psnr);
 }
 
+static unsigned pix_fmt_nb_planes(const AVPixFmtDescriptor *d)
+{
+	unsigned nb_planes = 0;
+	for (unsigned i=0; i<d->nb_components; i++)
+		nb_planes = MAX(nb_planes, d->comp[i].plane+1);
+	return nb_planes;
+}
+
 struct cimg {
 	unsigned lens[4];
 	uint8_t data[];
 };
+
+static void cimg_uncompress(const struct cimg *c, const struct pimg *tmp_img, const AVPixFmtDescriptor *d)
+{
+	unsigned nb_planes = pix_fmt_nb_planes(d);
+	for (unsigned i=0, k=0; i<nb_planes; i++) {
+		unsigned long ki;
+		lzo1x_decompress(c->data+k, c->lens[i], tmp_img->planes[i], &ki, NULL);
+		k += c->lens[i];
+	}
+}
 
 struct loc_ctx {
 	int w, h;
@@ -246,8 +264,8 @@ struct loc_ctx {
 	int tmp_page_idx;
 	int page_from, page_to;
 	enum AVPixelFormat pix_fmt;
-	const char *ren_dump_pat;
-	const char *vid_dump_pat;
+	char *ren_dump_pat;
+	char *vid_dump_pat;
 	unsigned compress : 1;
 };
 
@@ -261,14 +279,14 @@ static void pimg_swap(struct pimg *a, struct pimg *b)
 */
 static void frame_render_cmp(
 	const AVFrame *ref, const struct loc_ctx *ctx, int page_idx,
-	const struct pimg *tmp_img, double *ssim, double *psnr
+	const struct pimg *tmp_img, int *tmp_page_idx, double *ssim, double *psnr
 ) {
-	const struct cimg *c = ctx->buf[page_idx - ctx->page_from];
-	const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(ctx->pix_fmt);
-	for (unsigned i=0, k=0; i<d->nb_components; i++) {
-		unsigned long ki;
-		lzo1x_decompress(c->data+k, c->lens[i], tmp_img->planes[i], &ki, NULL);
-		k += c->lens[i];
+	if (!ctx->compress) {
+		tmp_img = &ctx->pbuf[page_idx - ctx->page_from];
+	} else if (*tmp_page_idx != page_idx) {
+		cimg_uncompress(ctx->buf[page_idx - ctx->page_from], tmp_img,
+		                av_pix_fmt_desc_get(ctx->pix_fmt));
+		*tmp_page_idx = page_idx;
 	}
 	frame_cmp(ref, tmp_img, ssim, psnr);
 }
@@ -317,7 +335,7 @@ static void locate(
 			DIE(1, "error allocating raw video buffer: %s", fferror(ret));
 #pragma omp for
 		for (int i=ctx->page_from; i<ctx->page_to; i++) {
-			frame_render_cmp(ref, ctx, c.page_idx = i, &tmp_img, &c.ssim, &c.psnr);
+			frame_render_cmp(ref, ctx, c.page_idx = i, &tmp_img, &(int){-1}, &c.ssim, &c.psnr);
 			res_list_sorted_insert(rr, &c, n_best);
 		}
 		av_freep(tmp_img.planes);
@@ -343,14 +361,14 @@ static void locate(
 	int d = pg, u = pg+1;
 	while (d >= ctx->page_from || u < ctx->page_to) {
 		if (d >= ctx->page_from) {
-			frame_render_cmp(ref, ctx, d, &ctx->tmp, &ssim, &psnr);
+			frame_render_cmp(ref, ctx, d, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
 			res_list_sorted_insert(r, &(struct res){ d, ssim, psnr }, n_best);
-			((struct loc_ctx *)ctx)->tmp_page_idx = d--;
+			d--;
 		}
 		if (u < ctx->page_to) {
-			frame_render_cmp(ref, ctx, u, &ctx->tmp, &ssim, &psnr);
+			frame_render_cmp(ref, ctx, u, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
 			res_list_sorted_insert(r, &(struct res){ u, ssim, psnr }, n_best);
-			((struct loc_ctx *)ctx)->tmp_page_idx = u++;
+			u++;
 		}
 	}
 }
@@ -374,13 +392,14 @@ static void ppm_export(
 	va_end(ap);
 
 #ifdef HAVE_ZLIB
+# define PPM_SUFFIX		".ppm.gz"
 # define FFILE			gzFile
 # define FOPEN(path,mode)	gzopen(path,mode)
 # define FPRINTF(file,fmt,...)	gzprintf(file,fmt,__VA_ARGS__)
 # define FWRITE(file,buf,sz)	gzwrite(file,buf,sz)
 # define FCLOSE(file)		gzclose(file)
-	strcat(buf, ".gz");
 #else
+# define PPM_SUFFIX		".ppm"
 # define FFILE			FILE *
 # define FOPEN(path,mode)	fopen(path,mode)
 # define FPRINTF(file,fmt,...)	fprintf(file,fmt,__VA_ARGS__)
@@ -393,6 +412,11 @@ static void ppm_export(
 	for (unsigned i=0; i<h; i++, d += tmp->strides[0])
 		FWRITE(f, d, 3*w);
 	FCLOSE(f);
+#undef FFILE
+#undef FOPEN
+#undef FPRINTF
+#undef FWRITE
+#undef FCLOSE
 }
 
 static int decoded_frame(
@@ -423,13 +447,12 @@ static int decoded_frame(
 			           &src, &ctx->vid_ppm, ctx->vid_dump_pat,
 			           r->page_idx+1, frame_idx, r->ssim);
 		}
-	} else if (ctx->tmp_page_idx != r->page_idx) {
-		frame_render_cmp(f0, ctx, r->page_idx, &ctx->tmp, &r->ssim, &r->psnr);
-		((struct loc_ctx *)ctx)->tmp_page_idx = r->page_idx;
-		fprintf(stderr, "reused  ");
 	} else {
-		frame_cmp(f0, &ctx->tmp, &r->ssim, &r->psnr);
-		fprintf(stderr, "reused0 ");
+		int reused0 = !ctx->compress || ctx->tmp_page_idx == r->page_idx;
+		frame_render_cmp(f0, ctx, r->page_idx, &ctx->tmp,
+		                 &((struct loc_ctx *)ctx)->tmp_page_idx,
+		                 &r->ssim, &r->psnr);
+		fprintf(stderr, reused0 ? "reused0 " : "reused  ");
 	}
 	fprintf(stderr, "cmp-to-page:");
 	for (unsigned i=0; i<ARRAY_SIZE(r); i++)
@@ -442,8 +465,7 @@ static int decoded_frame(
 }
 
 struct img_prep_args {
-	struct SwsContext *sws, *sws_ppm;
-	struct pimg        ppm;
+	struct SwsContext *sws;
 	struct loc_ctx    *ctx;
 	const AVPixFmtDescriptor *s;
 	const AVPixFmtDescriptor *d;
@@ -506,9 +528,7 @@ void vpdf_image_prepare(
 	int s = img->s;
 	const uint8_t *data = img->data;
 
-	unsigned nb_tgt_planes = 0;
-	for (unsigned i=0; i<4; i++)
-		nb_tgt_planes = MAX(nb_tgt_planes, a->d->comp[i].plane+1);
+	unsigned tgt_nb_planes = pix_fmt_nb_planes(a->d);
 	int tgt_pixsteps[4];
 	av_image_fill_max_pixsteps(tgt_pixsteps, NULL, a->d);
 
@@ -518,78 +538,76 @@ void vpdf_image_prepare(
 	        a->ctx->page_from+1, page_idx-a->ctx->page_from,
 	        a->ctx->page_to - a->ctx->page_from,
 	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
-#if 0
-	unsigned w = a->ctx->w - a->crop[2] - a->crop[3];
-	if (a->ctx->ren_dump_pat)
-		ppm_export(a->sws_ppm, w, a->ctx->h - a->crop[0] - a->crop[1],
-		           &(struct pimg){ { data, }, { img->s, } },
-		           &a->ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
-#endif
+
 	*a->u = v;
 
-	struct pimg tgt = a->ctx->tmp;
-	for (unsigned i=0; i<nb_tgt_planes; i++) {
+	struct pimg *rtgt = a->ctx->compress ? &a->ctx->tmp
+	                                     : a->ctx->pbuf+(page_idx-a->ctx->page_from);
+	struct pimg tgt = *rtgt;
+	for (unsigned i=0; i<tgt_nb_planes; i++) {
 		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
 		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
-		tgt.planes[i] +=  ( a->crop[0] >> hsh) * a->ctx->tmp.strides[i]
+		tgt.planes[i] +=  ( a->crop[0] >> hsh) * tgt.strides[i]
 		              +  -(-a->crop[2] >> wsh) * tgt_pixsteps[i];
 	}
 
 	sws_scale(a->sws, &data, &s, 0, img->h, tgt.planes, tgt.strides);
 
-	for (unsigned i=0; i<nb_tgt_planes; i++) {
+	for (unsigned i=0; i<tgt_nb_planes; i++) {
 		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
 		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
-		uint8_t *p = a->ctx->tmp.planes[i];
-		for (unsigned j=0; j < -(-a->ctx->h >> hsh); j++, p += a->ctx->tmp.strides[i]) {
+		uint8_t *p = rtgt->planes[i];
+		for (unsigned j=0; j < -(-a->ctx->h >> hsh); j++, p += rtgt->strides[i]) {
 			if (j < a->crop[0] || j >= ((a->ctx->h-a->crop[1]) >> hsh)) {
-				memset(p, black[a->is_yuv][i], a->ctx->tmp.strides[i]);
+				memset(p, black[a->is_yuv][i], rtgt->strides[i]);
 			} else {
 				int l = -(           -a->crop[2]  >> wsh) * tgt_pixsteps[i];
 				int r = ((a->ctx->w - a->crop[3]) >> wsh) * tgt_pixsteps[i];
 				memset(p    , black[a->is_yuv][i], l);
-				memset(p + r, black[a->is_yuv][i], a->ctx->tmp.strides[i] - r);
+				memset(p + r, black[a->is_yuv][i], rtgt->strides[i] - r);
 			}
 		}
 	}
 
 
 	if (a->ctx->ren_dump_pat)
-		ppm_export(a->ctx->vid_sws, a->ctx->w, a->ctx->h, &a->ctx->tmp,
+		ppm_export(a->ctx->vid_sws, a->ctx->w, a->ctx->h, rtgt,
 		           &a->ctx->vid_ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
 
 
-	a->ctx->tmp_page_idx = page_idx;
 	gettimeofday(&v, NULL);
 	fprintf(stderr, ", tform %s -> %s in %4.1f ms", a->s->name, a->d->name,
 	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
 
-	/* LZO compress */
-	unsigned long kj[4];
-	unsigned k = 0;
-	unsigned sz = 0;
-	*a->u = v;
-	for (unsigned j=0; j<a->d->nb_components; j++) {
-		unsigned ph  = -(-a->ctx->h >> (a->is_yuv && j ? a->d->log2_chroma_h : 0));
-		unsigned psz = ph * a->ctx->tmp.strides[j];
-		unsigned long osz;
-		sz += psz;
-		lzo1x_1_15_compress(a->ctx->tmp.planes[j], psz,
-				    a->compressed_buf+k, kj+j, a->wrkmem);
-		lzo1x_optimize(a->compressed_buf+k, kj[j],
-			       a->ctx->tmp.planes[j], &osz, NULL);
-		k += kj[j];
+	if (a->ctx->compress) {
+		/* LZO compress */
+		unsigned long kj[4];
+		unsigned k = 0;
+		unsigned sz = 0;
+		*a->u = v;
+		for (unsigned j=0; j<tgt_nb_planes; j++) {
+			unsigned ph  = -(-a->ctx->h >> (a->is_yuv && j ? a->d->log2_chroma_h : 0));
+			unsigned psz = ph * a->ctx->tmp.strides[j];
+			unsigned long osz;
+			sz += psz;
+			lzo1x_1_15_compress(a->ctx->tmp.planes[j], psz,
+					    a->compressed_buf+k, kj+j, a->wrkmem);
+			lzo1x_optimize(a->compressed_buf+k, kj[j],
+				       a->ctx->tmp.planes[j], &osz, NULL);
+			k += kj[j];
+		}
+		gettimeofday(&v, NULL);
+		fprintf(stderr, ", compressed in %4.0f us: %u -> %*u bytes (%5.1f%%)",
+			(v.tv_sec-a->u->tv_sec)*1e6+(v.tv_usec-a->u->tv_usec),
+			sz, snprintf(NULL, 0, "%u", sz), k, 100.0*k/sz);
+		struct cimg *c = malloc(offsetof(struct cimg,data)+k);
+		for (unsigned j=0; j<tgt_nb_planes; j++)
+			c->lens[j] = kj[j];
+		memcpy(c->data, a->compressed_buf, k);
+		a->ctx->buf[page_idx - a->ctx->page_from] = c;
 	}
-	gettimeofday(&v, NULL);
-	fprintf(stderr, ", compressed in %4.0f us: %u -> %*u bytes (%5.1f%%)\n",
-		(v.tv_sec-a->u->tv_sec)*1e6+(v.tv_usec-a->u->tv_usec),
-		sz, snprintf(NULL, 0, "%u", sz), k, 100.0*k/sz);
-	struct cimg *c = malloc(offsetof(struct cimg,data)+k);
-	for (unsigned j=0; j<a->d->nb_components; j++)
-		c->lens[j] = kj[j];
-	memcpy(c->data, a->compressed_buf, k);
-	a->ctx->buf[page_idx - a->ctx->page_from] = c;
 
+	fprintf(stderr, "\n");
 	gettimeofday(a->u, NULL);
 }
 
@@ -611,17 +629,9 @@ static void render(
 	a.sws = tform_sws_context(ctx->w - crop[2] - crop[3],
 	                          ctx->h - crop[0] - crop[1],
 	                          ren->fmt, ctx->pix_fmt);
-	a.sws_ppm = NULL;
-	if (ctx->ren_dump_pat) {
-		a.sws_ppm = tform_sws_context(ctx->w, ctx->h, ren->fmt, AV_PIX_FMT_RGB24);
-		int r;
-		if ((r = av_image_alloc(a.ppm.planes, a.ppm.strides,
-		                        ctx->w, ctx->h, AV_PIX_FMT_RGB24, 1)) < 0)
-			DIE(1, "error allocating raw video buffer: %s", fferror(r));
-	}
 	a.ctx = ctx;
-	a.compressed_buf = compressed_buf;
-	a.wrkmem = wrkmem;
+	a.compressed_buf = ctx->compress ? compressed_buf : NULL;
+	a.wrkmem = ctx->compress ? wrkmem : NULL;
 	a.crop = crop;
 	a.s = av_pix_fmt_desc_get(ren->fmt);
 	a.d = av_pix_fmt_desc_get(ctx->pix_fmt);
@@ -636,10 +646,6 @@ static void render(
 	gettimeofday(a.u, NULL);
 	ren->render(ren_inst, ctx->page_from, ctx->page_to, &a);
 
-	if (a.sws_ppm) {
-		sws_freeContext(a.sws_ppm);
-		av_freep(a.ppm.planes);
-	}
 	sws_freeContext(a.sws);
 }
 
@@ -750,6 +756,9 @@ static struct {
 #endif
 };
 
+#define VPDF_SYNC_REN_DUMP_PAT_PAT	"%s/%%04d-%s" PPM_SUFFIX
+#define VPDF_SYNC_VID_DUMP_PAT_PAT	"%s/%%04d-%%05d-%%6.4f" PPM_SUFFIX
+
 static void usage(const char *progname)
 {
 	printf("usage: %s [-OPTS] [--] VID REN_OPTS...\n", progname);
@@ -758,13 +767,13 @@ static void usage(const char *progname)
 Options [defaults]:\n\
   -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]\n\
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [%g]\n\
-  -D DIR       dump rendered images into DIR (named PAGE-REN.ppm)\n\
-  -f PG_FROM   page interval start (inclusive) [0]\n\
+  -D DIR       dump rendered images into DIR (named PAGE-REN" PPM_SUFFIX ")\n\
+  -f PG_FROM   page interval start (1-based, inclusive) [1]\n\
   -h           display this help message\n\
   -r REN       use REN to render PDF [%s]\n\
-  -t PG_TO     page interval stop (exclusive) [page-num]\n\
+  -t PG_TO     page interval stop (1-based, inclusive) [page-num]\n\
   -u           don't compress pages (watch out for OOM)\n\
-  -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM.ppm)\n\
+  -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM" PPM_SUFFIX ")\n\
   -y           toggle compare luma plane only [%s]\n\
 ",
 	       VPDF_SYNC_VID_DIFF_SSIM,
@@ -795,6 +804,26 @@ Options [defaults]:\n\
 	        AV_STRINGIFY(LIBSWSCALE_VERSION),
 	        v >> 16, (v >> 8) & 0xff, v & 0xff);
 }
+
+#ifndef _GNU_SOURCE
+static int asprintf(char **ptr, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int len = vsnprintf(NULL, 0, fmt, ap);
+	va_end(ap);
+	if (len < 0)
+		goto out;
+	char *buf = malloc(len+1);
+	if (!buf)
+		return -1;
+	va_start(ap, fmt);
+	len = vsnprintf(buf, len+1, fmt, ap);
+	va_end(ap);
+out:
+	return len;
+}
+#endif
 
 int main(int argc, char **argv)
 {
@@ -833,8 +862,8 @@ int main(int argc, char **argv)
 			break;
 		case 'f':
 			page_from = strtol(optarg, &endptr, 10);
-			if (*endptr)
-				DIE(1, "expected decimal parameter for option '-f'\n");
+			if (*endptr || page_from-- <= 0)
+				DIE(1, "expected positive decimal parameter for option '-f'\n");
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -844,8 +873,8 @@ int main(int argc, char **argv)
 			break;
 		case 't':
 			page_to = strtol(optarg, &endptr, 10);
-			if (*endptr)
-				DIE(1, "expected decimal parameter for option '-t'\n");
+			if (*endptr || page_to <= 0)
+				DIE(1, "expected positive decimal parameter for option '-t'\n");
 			break;
 		case 'u': compress = 0; break;
 		case 'V':
@@ -912,34 +941,26 @@ int main(int argc, char **argv)
 		DIE(1, "error creating renderer '%s': check its params\n", ren_id);
 	unsigned n_pages = ren->n_pages(ren_inst);
 
-#define VPDF_SYNC_REN_DUMP_PAT_PAT	"%s/%%04d-%s.ppm"
-	int len = snprintf(NULL, 0, VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, ren_id);
-	char ren_dump_pat_buf[len+1];
-	snprintf(ren_dump_pat_buf, sizeof(ren_dump_pat_buf),
-	         VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, ren_id);
-
-#define VPDF_SYNC_VID_DUMP_PAT_PAT	"%s/%%04d-%%05d-%%6.4f.ppm"
-	len = snprintf(NULL, 0, VPDF_SYNC_VID_DUMP_PAT_PAT, vid_dump_dir);
-	char vid_dump_pat_buf[len+1];
-	len = snprintf(vid_dump_pat_buf, sizeof(vid_dump_pat_buf),
-	               VPDF_SYNC_VID_DUMP_PAT_PAT, vid_dump_dir);
-
 	if (page_to < 0 || page_to > n_pages)
 		page_to = n_pages;
 	n_pages = page_to - page_from;
 	struct cimg *imgs[n_pages];
 	struct loc_ctx ctx = {
-		w, h, imgs, NULL, PIMG_INIT, PIMG_INIT, NULL,
+		w, h, NULL, NULL, PIMG_INIT, PIMG_INIT, NULL,
 		-1, page_from, page_to, vin.vid_ctx->pix_fmt,
-		ren_dump_dir ? ren_dump_pat_buf : NULL,
-		vid_dump_dir ? vid_dump_pat_buf : NULL,
+		NULL,
+		NULL,
 		compress,
 	};
+	if (ren_dump_dir)
+		asprintf(&ctx.ren_dump_pat, VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, ren_id);
+	if (vid_dump_dir)
+		asprintf(&ctx.vid_dump_pat, VPDF_SYNC_VID_DUMP_PAT_PAT, vid_dump_dir);
 	if ((r = av_image_alloc(ctx.tmp.planes, ctx.tmp.strides,
-	                        w, h, vin.vid_ctx->pix_fmt, 1)) < 0)
+	                        w, h, ctx.pix_fmt, 1)) < 0)
 		DIE(1, "error allocating raw video buffer: %s", fferror(r));
 
-	if (ctx.vid_dump_pat) {
+	if (ctx.vid_dump_pat || ctx.ren_dump_pat) {
 		ctx.vid_sws = tform_sws_context(w, h, ctx.pix_fmt, AV_PIX_FMT_RGB24);
 		int r;
 		if ((r = av_image_alloc(ctx.vid_ppm.planes, ctx.vid_ppm.strides,
@@ -947,10 +968,28 @@ int main(int argc, char **argv)
 			DIE(1, "error allocating raw video buffer: %s", fferror(r));
 	}
 
+	if (compress) {
+		ctx.buf = imgs;
+	} else {
+		ctx.pbuf = calloc(page_to - page_from, sizeof(*ctx.pbuf));
+		for (int i=0; i<page_to-page_from; i++)
+			if ((r = av_image_alloc(ctx.pbuf[i].planes, ctx.pbuf[i].strides, w, h, ctx.pix_fmt, 1)) < 0)
+				DIE(1, "error allocating raw video buffer: %s\n", fferror(r));
+	}
+
 	render(&ctx, ren, ren_inst, crop);
 	ren->destroy(ren_inst);
 
 	run_vid_cmp(&vin, &ctx, vid_diff_ssim);
+
+	if (ctx.pbuf) {
+		for (int i=0; i<page_to-page_from; i++)
+			av_freep(ctx.pbuf[i].planes);
+		free(ctx.pbuf);
+	} else {
+		for (unsigned i=0; i<ARRAY_SIZE(imgs); i++)
+			free(imgs[i]);
+	}
 
 	if (ctx.vid_sws) {
 		sws_freeContext(ctx.vid_sws);
@@ -958,9 +997,8 @@ int main(int argc, char **argv)
 	}
 
 	av_freep(ctx.tmp.planes);
-
-	for (unsigned i=0; i<ARRAY_SIZE(imgs); i++)
-		free(imgs[i]);
+	free(ctx.ren_dump_pat);
+	free(ctx.vid_dump_pat);
 
 	ff_vinput_close(&vin);
 }
