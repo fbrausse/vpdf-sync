@@ -8,18 +8,19 @@
 
 #include "common.h"
 #include "renderer.h"
+#include "ff-input.h"
 
 #define VPDF_SYNC_VID_DIFF_SSIM		0.98
-#define VPDF_SYNC_SSIM_K1		.01
-#define VPDF_SYNC_SSIM_K2		.03
 #define VPDF_SYNC_N_BEST_MATCHES	4
+
+#ifndef PLANE_CMP2_EXTRA_FLAGS
+# define PLANE_CMP2_EXTRA_FLAGS		0
+#endif
 
 C_NAMESPACE_BEGIN
 
-#include "ssim/ssim-impl.h"
+#include "ssim-impl.h"
 
-#include <libavformat/avformat.h>	/* avformat_*() */
-#include <libavutil/imgutils.h>		/* av_image_alloc() */
 #include <libswscale/swscale.h>
 
 #ifdef HAVE_LZO
@@ -29,65 +30,6 @@ C_NAMESPACE_BEGIN
 #ifdef HAVE_ZLIB
 # include <zlib.h>
 #endif
-
-#define PLANE_CMP2_SSIM	(1 << 0)
-#define PLANE_CMP2_PSNR	(1 << 1)
-
-static void plane_cmp2(
-	const uint8_t *a, const uint8_t *b,
-	const unsigned w, const unsigned h, const unsigned stride,
-	struct cnt2 *const c, unsigned flags
-) {
-	uint32_t mean = 0, _mse = 0;
-	int64_t s2 = 0, cv = 0;
-	for (unsigned j=0; j<h; j+=8, a += 8*stride, b += 8*stride)
-		for (unsigned i=0; i<w; i+=8) {
-			if (flags & PLANE_CMP2_SSIM)
-				mu_var_2x8x8_2(a + i, b + i, stride, &mean, &s2);
-#if 1
-			if (flags & PLANE_CMP2_SSIM)
-				covar_2(a + i, b + i, stride, &mean, &cv);
-			if (flags & PLANE_CMP2_PSNR)
-				mse(a + i, b + i, stride, &_mse);
-#else
-			if (flags & (PLANE_CMP2_SSIM | PLANE_CMP2_PSNR)) {
-				covar_3(a + i, b + i, stride, &mean, &cv);
-				_mse = cv >> 32;
-				cv = (s32)cv;
-			}
-#endif
-			cnt2_done(c, mean, cv, s2, _mse);
-		}
-}
-
-
-static void get_cnt2(const struct cnt2 *c, double div, double *_ssim, double *_psnr)
-{
-	double dm0 = c->m0 / div;
-	double dm1 = c->m1 / div;
-	double dmse = c->mse / div;
-	double dcv = c->cv / (div * (1 << 12));
-	double ds20 = c->s20 / (div * 64);
-	double ds21 = c->s21 / (div * 64);
-
-	double c1, c2;
-	double k1 = VPDF_SYNC_SSIM_K1, k2 = VPDF_SYNC_SSIM_K2;
-	double L;
-	L = 255;
-	c1 = k1 * L;
-	c2 = k2 * L;
-	c1 *= c1;
-	c2 *= c2;
-
-	double Y = (2*dm0*dm1 + c1) / (dm0 * dm0 + dm1 * dm1 + c1);
-	double C = (2 * dcv + c2) / (ds20 + ds21 + c2);
-	double ssim = Y * C;
-//	double dssim = 1.0 / (1.0 - ssim);
-	double psnr = 10.0 * log10(L*L / dmse);
-
-	if (_ssim) *_ssim = ssim;
-	if (_psnr) *_psnr = psnr;
-}
 
 struct cimg {
 	unsigned lens[4];
@@ -100,7 +42,14 @@ struct pimg {
 };
 
 #define PIMG_INIT	{ { NULL, NULL, NULL, NULL, }, { 0, 0, 0, 0, }, }
-
+/*
+static void pimg_swap(struct pimg *a, struct pimg *b)
+{
+	struct pimg c = *a;
+	*a = *b;
+	*b = c;
+}
+*/
 struct pix_desc {
 	const AVPixFmtDescriptor *d;
 	enum AVPixelFormat pix_fmt;
@@ -151,7 +100,7 @@ static void frame_cmp(const AVFrame *ref, const struct pimg *ren, double *ssim, 
 		unsigned h = ref->height >> (i ? d->log2_chroma_h : 0);
 		num += w * h;
 		plane_cmp2(ref->data[i], ren->planes[i], w, h, ref->linesize[i],
-		           &c, PLANE_CMP2_SSIM | 0*PLANE_CMP2_PSNR);
+		           &c, PLANE_CMP2_SSIM | PLANE_CMP2_EXTRA_FLAGS);
 	}
 	get_cnt2(&c, num, ssim, psnr);
 }
@@ -167,14 +116,6 @@ static void cimg_uncompress(const struct cimg *c, const struct pimg *tmp_img, co
 }
 #endif
 
-/*
-static void pimg_swap(struct pimg *a, struct pimg *b)
-{
-	struct pimg c = *a;
-	*a = *b;
-	*b = c;
-}
-*/
 static void frame_render_cmp(
 	const AVFrame *ref, const struct loc_ctx *ctx, int page_idx,
 	const struct pimg *tmp_img, int *tmp_page_idx, double *ssim, double *psnr
@@ -190,12 +131,6 @@ static void frame_render_cmp(
 	}
 #endif
 	frame_cmp(ref, tmp_img, ssim, psnr, ctx);
-}
-
-static char * fferror(int errnum)
-{
-	static char str[AV_ERROR_MAX_STRING_SIZE] = {0};
-	return av_make_error_string(str, sizeof(str), errnum);
 }
 
 struct res {
@@ -517,73 +452,6 @@ static void render(
 	sws_freeContext(a.sws);
 }
 
-struct ff_vinput {
-	AVFormatContext *fmt_ctx;
-	AVStream *vid_stream;
-	AVCodecContext *vid_ctx;
-	AVCodec *vid_codec;
-	int vid_stream_idx;
-	int end_of_stream, got_frame;
-	AVPacket pkt;
-};
-
-#define FF_VINPUT_INIT	{ NULL, NULL, NULL, NULL, -1, 0, 0 }
-
-static void ff_vinput_open(struct ff_vinput *ff, const char *vid_path)
-{
-	int r;
-	if ((r = avformat_open_input(&ff->fmt_ctx, vid_path, NULL, NULL)) < 0)
-		DIE(1, "error opening VID '%s': %s\n", vid_path, fferror(r));
-	if ((r = avformat_find_stream_info(ff->fmt_ctx, NULL)) < 0)
-		DIE(1, "error finding stream info of VID '%s': %s\n", vid_path,
-		    fferror(r));
-	if ((r = av_find_best_stream(ff->fmt_ctx, AVMEDIA_TYPE_VIDEO,
-	                             -1, -1, NULL, 0)) < 0)
-		DIE(1, "error finding %s stream in VID '%s': %s\n",
-		    av_get_media_type_string(AVMEDIA_TYPE_VIDEO), vid_path,
-		    fferror(r));
-	ff->vid_stream_idx = r;
-	ff->vid_stream = ff->fmt_ctx->streams[ff->vid_stream_idx];
-	ff->vid_ctx    = ff->vid_stream->codec;
-	if (!(ff->vid_codec = avcodec_find_decoder(ff->vid_ctx->codec_id)))
-		DIE(1, "error finding %s codec %s for VID '%s'\n",
-		    av_get_media_type_string(AVMEDIA_TYPE_VIDEO),
-		    avcodec_get_name(ff->vid_ctx->codec_id), vid_path);
-	if ((r = avcodec_open2(ff->vid_ctx, ff->vid_codec, NULL)) < 0)
-		DIE(1, "error opening %s codec for VID '%s': %s\n",
-		    av_get_media_type_string(AVMEDIA_TYPE_VIDEO), vid_path,
-		    fferror(r));
-	av_init_packet(&ff->pkt);
-}
-
-static int ff_vinput_read_frame(struct ff_vinput *ff, AVFrame *fr, int frame_idx)
-{
-	while (!ff->end_of_stream || ff->got_frame) {
-		if (!ff->end_of_stream && av_read_frame(ff->fmt_ctx, &ff->pkt) < 0)
-			ff->end_of_stream = 1;
-		if (ff->end_of_stream) {
-			ff->pkt.data = NULL;
-			ff->pkt.size = 0;
-		}
-		if (ff->pkt.stream_index == ff->vid_stream_idx || ff->end_of_stream) {
-			ff->got_frame = 0;
-			if (ff->pkt.pts == AV_NOPTS_VALUE)
-				ff->pkt.pts = ff->pkt.dts = frame_idx;
-			int r = avcodec_decode_video2(ff->vid_ctx, fr, &ff->got_frame, &ff->pkt);
-			if (r < 0) {
-				fprintf(stderr, "error decoding VID frame %d: %s\n",
-				        frame_idx, fferror(r));
-				return r;
-			}
-			av_packet_unref(&ff->pkt);
-			av_init_packet(&ff->pkt);
-			if (ff->got_frame)
-				return 1;
-		}
-	}
-	return 0;
-}
-
 static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, double vid_diff_ssim)
 {
 	AVFrame *fr[2] = { av_frame_alloc(), av_frame_alloc(), };
@@ -596,13 +464,6 @@ static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, double vid_d
 
 	av_frame_free(fr+0);
 	av_frame_free(fr+1);
-}
-
-static void ff_vinput_close(struct ff_vinput *ff)
-{
-	av_packet_unref(&ff->pkt);
-	avcodec_close(ff->vid_ctx);
-	avformat_close_input(&ff->fmt_ctx);
 }
 
 extern struct vpdf_ren vpdf_ren_poppler_glib;
@@ -687,15 +548,17 @@ static int asprintf(char **ptr, const char *fmt, ...)
 	va_start(ap, fmt);
 	int len = vsnprintf(NULL, 0, fmt, ap);
 	va_end(ap);
-	if (len < 0)
-		goto out;
+	if (len < 0) {
+		perror("vsnprintf");
+		return len;
+	}
 	char *buf = malloc(len+1);
 	if (!buf)
 		return -1;
 	va_start(ap, fmt);
 	len = vsnprintf(buf, len+1, fmt, ap);
 	va_end(ap);
-out:
+	*ptr = len < 0 ? free(buf), NULL : buf;
 	return len;
 }
 #endif

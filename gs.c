@@ -202,7 +202,9 @@ static void * create(int argc, char **argv, unsigned w, unsigned h)
 		DIE(1, "error: gsapi_init_with_args(..., %s, ...) failed w/ code %d\n",
 		    display_format, r);
 
-#define GS_CMD_PDF_BEGIN	"(%s) (r) file runpdfbegin\n"
+#define GS_CMD_PDF_BEGIN \
+	"(%s) (r) file runpdfbegin\n" \
+	/*"{1.2 exp} dup dup currenttransfer setcolortransfer\n"*/
 	int user_error;
 	int len = snprintf(NULL, 0, GS_CMD_PDF_BEGIN, pdf_path);
 	char cmd[len+1];
