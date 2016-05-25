@@ -531,7 +531,7 @@ Options [defaults]:\n\
   -y           toggle compare luma plane only [YUV]\n\
 ",
 	       VPDF_SYNC_RDIFF_TH,
-	       renderers[0].id,
+	       ARRAY_SIZE(renderers) ? renderers[0].id : "",
 #ifdef HAVE_LZO
 	       "compress"
 #else
@@ -547,9 +547,16 @@ Options [defaults]:\n\
 	}
 
 	fprintf(stderr, "\nLibraries   (compiled,\tlinked):\n");
+#ifdef HAVE_ZLIB
+	fprintf(stderr, "  zlib      (%s,\t%s)\n",
+	        ZLIB_VERSION, zlibVersion());
+#endif
 #ifdef HAVE_LZO
 	fprintf(stderr, "  LZO       (%s,\t%s)\n",
 	        LZO_VERSION_STRING, lzo_version_string());
+#endif
+#ifdef _OPENMP
+	fprintf(stderr, "  OpenMP    (%d)\n", _OPENMP);
 #endif
 	unsigned v;
 	v = avformat_version();

@@ -5,21 +5,68 @@
 ###############################################################################
 
 ###############################################################################
-# compile-time selectable features
+# compile-time requirements:
+#
+#   AMD64 platform: SSIM computation is just available as highly optimized SSE2
+#                   assembler code using all of AMD64's 16 SSE registers
+#
+#   libavformat libavcodec libswscale libavutil:
+#                   from FFmpeg, a fast and versatile video en/decoding library
+#
+#   pkg-config:     to find compiler/linker flags for packages (but hey: no
+#                   configure-script / autotools required)
+#
+#   GNU make:       this Makefile uses some GNU make specific features
+#
 ###############################################################################
-OPTS = poppler-cairo poppler-splash ghostscript zlib lzo openmp
+# compile-time optionally selectable features (in OPTS variable below):
+#
+#   poppler-cairo:  cairo/glib-based rendering backend to poppler
+#                   used by atril/evince graphical PDF reader
+#                   better-quality font rendering due to subpixel anti-aliasing
+#                   (selectable during run-time)
+#
+#   poppler-splash: xpdf-3.0-based C++ rendering backend to poppler
+#                   optionally used by KDE's Okular graphical PDF reader
+#                   (selectable during run-time)
+#
+#   ghostscript:    PostScript interpreter with PDF I/O devices
+#                   optionally used by KDE's Okular graphical PDF reader
+#                   (selectable during run-time)
+#
+#   zlib:           used only for options '-D' and '-V' for gzip-compressed
+#                   ppm(5) image exports of rendered frames; if not given, PPMs
+#                   are written uncompressed
+#
+#   lzo:            used for fast compression of rendered frames in memory,
+#                   typically reduces memory footprint by 90% with neglible
+#                   runtime overhead; enables processing of PDFs with >1k pages
+#                   on commodity hardware
+#                   (can be disabled during run-time)
+#
+#   openmp:         enables OpenMP-based parallelization of a) poppler-splash
+#                   rendering and b) locating/comparing VID frame in/to all
+#                   rendered frames (by any backend)
+###############################################################################
+OPTS :=
+OPTS += poppler-cairo
+OPTS += poppler-splash
+OPTS += ghostscript
+OPTS += zlib
+OPTS += lzo
+OPTS += openmp
 
 #######################
 # begin compile options
 #######################
 
-CC := $(CC) -std=c11
-CXX := $(CXX) -std=c++11
-WARN_FLAGS = -Wall -Wno-unused-function
-CFLAGS   = -O2 $(WARN_FLAGS)
-CXXFLAGS = $(CFLAGS)
-CPPFLAGS = -DNDEBUG
-override LDFLAGS = $(CFLAGS) -Wl,--as-needed
+CC               := $(CC) -std=c11
+CXX              := $(CXX) -std=c++11
+WARN_FLAGS        = -Wall -Wno-unused-function
+CFLAGS            = -O2 $(WARN_FLAGS)
+CXXFLAGS          = $(CFLAGS)
+CPPFLAGS          = -DNDEBUG
+override LDFLAGS  = $(CFLAGS) -Wl,--as-needed
 
 ###############################################################################
 # end of options;
@@ -34,68 +81,72 @@ SRCS :=
 OBJS :=
 
 ifneq ($(findstring poppler-cairo,$(OPTS)),)
-PDF_SRCS += poppler-pdf-glib.c
-PDF_PKGS += poppler-glib
-override CPPFLAGS += -DHAVE_POPPLER_GLIB
+ PDF_SRCS += poppler-pdf-glib.c
+ PDF_PKGS += poppler-glib
+ override CPPFLAGS += -DHAVE_POPPLER_GLIB
 endif
 
 ifneq ($(findstring poppler-splash,$(OPTS)),)
-PDF_SRCS += poppler-pdf-cpp.cc
-PDF_PKGS += poppler-cpp
-override CPPFLAGS += -DHAVE_POPPLER_CPP
-ifneq ($(findstring openmp,$(OPTS)),)
-poppler-pdf-cpp.o: CXXFLAGS += -fopenmp
-endif
+ PDF_SRCS += poppler-pdf-cpp.cc
+ PDF_PKGS += poppler-cpp
+ override CPPFLAGS += -DHAVE_POPPLER_CPP
+ ifneq ($(findstring openmp,$(OPTS)),)
+  poppler-pdf-cpp.o: CXXFLAGS += -fopenmp
+ endif
 endif
 
 ifneq ($(findstring ghostscript,$(OPTS)),)
-PDF_SRCS += gs.c
-PDF_PKGS +=
-override CPPFLAGS += -DHAVE_GS
-override LDLIBS   += -lgs
+ PDF_SRCS += gs.c
+ PDF_PKGS +=
+ override CPPFLAGS += -DHAVE_GS
+ override LDLIBS   += -lgs
 endif
 
 ifneq ($(findstring zlib,$(OPTS)),)
-PKGS += zlib
-override CPPFLAGS += -DHAVE_ZLIB
+ PKGS += zlib
+ override CPPFLAGS += -DHAVE_ZLIB
 endif
 
 ifneq ($(findstring lzo,$(OPTS)),)
-override LDLIBS   += -llzo2
-override CPPFLAGS += -DHAVE_LZO
+ override LDLIBS   += -llzo2
+ override CPPFLAGS += -DHAVE_LZO
 endif
+
+###############################################################################
+# fixed section
+###############################################################################
 
 PKGS += libavformat libavcodec libswscale libavutil
 
 override CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 
-SRCS += vpdf-sync.c $(PDF_SRCS)
-C_SRCS   = $(filter %.c,$(SRCS))
-CXX_SRCS = $(filter %.cc,$(SRCS))
-C_OBJS   = $(C_SRCS:.c=.o)
-CXX_OBJS = $(CXX_SRCS:.cc=.o)
-OBJS += $(C_OBJS) $(CXX_OBJS) ssim-impl.o
+SRCS     += vpdf-sync.c $(PDF_SRCS)
+C_SRCS    = $(filter %.c,$(SRCS))
+CXX_SRCS  = $(filter %.cc,$(SRCS))
+C_OBJS    = $(C_SRCS:.c=.o)
+CXX_OBJS  = $(CXX_SRCS:.cc=.o)
+OBJS     += $(C_OBJS) $(CXX_OBJS) ssim-impl.o
 
 ifneq ($(findstring openmp,$(OPTS)),)
-vpdf-sync.o: CFLAGS += -fopenmp
-vpdf-sync: override LDFLAGS += -fopenmp
+ vpdf-sync.o: CFLAGS += -fopenmp
+ vpdf-sync: override LDFLAGS += -fopenmp
 endif
 
 ifeq ($(V),1)
-Q :=
+ Q :=
 else
-Q := @
+ Q := @
 endif
 
 ifeq ($(CXX_OBJS),)
-LINK = $(CC)
+ LINK = $(CC)
 else
-LINK = $(CXX)
+ LINK = $(CXX)
 endif
 
 all: vpdf-sync
 
-vpdf-sync: override LDLIBS += $(shell pkg-config --libs $(PKGS) $(PDF_PKGS))
+vpdf-sync: override LDLIBS += $(shell pkg-config --libs $(PKGS) $(PDF_PKGS)) -lm
 vpdf-sync: $(OBJS)
 	@echo "  [LD]  $@"
 	$(Q)$(LINK) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -122,13 +173,13 @@ $(patsubst %.cc,%.o,$(filter %.cc,$(PDF_SRCS))): override CXXFLAGS += $(shell pk
 clean:
 	$(RM) $(OBJS) vpdf-sync
 
-ccheck:
-	# c90 unsupported by ffmpeg headers
-	$(MAKE) clean && $(MAKE) all CC=gcc\ -std=c99
-	$(MAKE) clean && $(MAKE) all CC=gcc\ -std=c11
-	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++98
-	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++03
-	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++11
-	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++14
+#ccheck:
+#	# c90 unsupported by ffmpeg headers
+#	$(MAKE) clean && $(MAKE) all CC=gcc\ -std=c99
+#	$(MAKE) clean && $(MAKE) all CC=gcc\ -std=c11
+#	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++98
+#	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++03
+#	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++11
+#	$(MAKE) clean && $(MAKE) all CC=g++\ -std=c++14
 
-.PHONY: all clean dist check _check
+.PHONY: all clean #ccheck
