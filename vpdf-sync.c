@@ -10,7 +10,7 @@
 #include "renderer.h"
 #include "ff-input.h"
 
-#define VPDF_SYNC_VID_DIFF_SSIM		0.98
+#define VPDF_SYNC_RDIFF_TH		.125
 #define VPDF_SYNC_N_BEST_MATCHES	4
 
 #ifndef PLANE_CMP2_EXTRA_FLAGS
@@ -88,18 +88,24 @@ struct loc_ctx {
 	unsigned compress : 1;
 };
 
-static void frame_cmp(const AVFrame *ref, const struct pimg *ren, double *ssim, double *psnr, const struct loc_ctx *ctx)
-{
+static void frame_cmp(
+	const uint8_t *const ref_planes[static 4], const int ref_strides[static 4],
+	const struct pimg *ren, double *ssim, double *psnr,
+	const struct loc_ctx *ctx
+) {
 	struct cnt2 c;
 	memset(&c, 0, sizeof(c));
 	const AVPixFmtDescriptor *d = ctx->pix_desc.d;
 
+	for (unsigned i=0; i<4; i++)
+		assert(ref_strides[i] == ren->strides[i]);
+
 	unsigned num = 0; /* #blocks per frame, needed for avg */
 	for (unsigned i=0; i<ctx->frame_cmp_nb_planes; i++) {
-		unsigned w = ref->width  >> (i ? d->log2_chroma_w : 0);
-		unsigned h = ref->height >> (i ? d->log2_chroma_h : 0);
+		unsigned w = ctx->w >> (i ? d->log2_chroma_w : 0);
+		unsigned h = ctx->h >> (i ? d->log2_chroma_h : 0);
 		num += w * h;
-		plane_cmp2(ref->data[i], ren->planes[i], w, h, ref->linesize[i],
+		plane_cmp2(ref_planes[i], ren->planes[i], w, h, ren->strides[i],
 		           &c, PLANE_CMP2_SSIM | PLANE_CMP2_EXTRA_FLAGS);
 	}
 	get_cnt2(&c, num, ssim, psnr);
@@ -116,9 +122,9 @@ static void cimg_uncompress(const struct cimg *c, const struct pimg *tmp_img, co
 }
 #endif
 
-static void frame_render_cmp(
-	const AVFrame *ref, const struct loc_ctx *ctx, int page_idx,
-	const struct pimg *tmp_img, int *tmp_page_idx, double *ssim, double *psnr
+static const struct pimg * frame_render(
+	const struct loc_ctx *ctx, int page_idx,
+	const struct pimg *tmp_img, int *tmp_page_idx
 ) {
 	if (!ctx->compress) {
 		tmp_img = &ctx->pbuf[page_idx - ctx->page_from];
@@ -130,7 +136,17 @@ static void frame_render_cmp(
 		*tmp_page_idx = page_idx;
 	}
 #endif
-	frame_cmp(ref, tmp_img, ssim, psnr, ctx);
+	return tmp_img;
+}
+
+static void frame_render_cmp(
+	const uint8_t *const ref_planes[static 4], const int ref_strides[static 4],
+	const struct loc_ctx *ctx, int page_idx,
+	const struct pimg *tmp_img, int *tmp_page_idx, double *ssim, double *psnr
+) {
+	frame_cmp(ref_planes, ref_strides,
+	          frame_render(ctx, page_idx, tmp_img, tmp_page_idx),
+	          ssim, psnr, ctx);
 }
 
 struct res {
@@ -154,7 +170,8 @@ static struct res * res_list_sorted_insert(struct res *r, const struct res *c, u
 #include <omp.h>
 
 static void locate(
-	const AVFrame *const ref, const struct loc_ctx *const ctx,
+	const uint8_t *const ref_planes[static 4], const int ref_strides[static 4],
+	const struct loc_ctx *const ctx,
 	int last_page, const unsigned n_best, struct res r[static n_best]
 ) {
 	struct res rr[n_best];
@@ -162,16 +179,16 @@ static void locate(
 	struct res c;
 	for (unsigned i=0; i<n_best; i++)
 		r[i] = (struct res)RES_INIT;
-#pragma omp parallel private(rr,tmp_img,c) shared(r)
+#pragma omp parallel private(rr,tmp_img,c) shared(r,ref_planes,ref_strides)
 	{
 		memcpy(rr, r, sizeof(*r)*n_best);
 		int ret;
 		if ((ret = av_image_alloc(tmp_img.planes, tmp_img.strides,
-		                          ref->width, ref->height, ref->format, 1)) < 0)
+		                          ctx->w, ctx->h, ctx->pix_desc.pix_fmt, 1)) < 0)
 			DIE(1, "error allocating raw video buffer: %s", fferror(ret));
 #pragma omp for
 		for (int i=ctx->page_from; i<ctx->page_to; i++) {
-			frame_render_cmp(ref, ctx, c.page_idx = i, &tmp_img, &(int){-1}, &c.ssim, &c.psnr);
+			frame_render_cmp(ref_planes, ref_strides, ctx, c.page_idx = i, &tmp_img, &(int){-1}, &c.ssim, &c.psnr);
 			res_list_sorted_insert(rr, &c, n_best);
 		}
 		av_freep(tmp_img.planes);
@@ -186,7 +203,8 @@ static void locate(
 }
 #else
 static void locate(
-	const AVFrame *ref, const struct loc_ctx *ctx,
+	const uint8_t *const ref_planes[static 4], const int ref_strides[static 4],
+	const struct loc_ctx *ctx,
 	int last_page, unsigned n_best, struct res r[static n_best]
 ) {
 	for (unsigned i=0; i<n_best; i++)
@@ -197,12 +215,12 @@ static void locate(
 	int d = pg, u = pg+1;
 	while (d >= ctx->page_from || u < ctx->page_to) {
 		if (d >= ctx->page_from) {
-			frame_render_cmp(ref, ctx, d, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
+			frame_render_cmp(ref_planes, ref_strides, ctx, d, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
 			res_list_sorted_insert(r, &(struct res){ d, ssim, psnr }, n_best);
 			d--;
 		}
 		if (u < ctx->page_to) {
-			frame_render_cmp(ref, ctx, u, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
+			frame_render_cmp(ref_planes, ref_strides, ctx, u, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
 			res_list_sorted_insert(r, &(struct res){ u, ssim, psnr }, n_best);
 			u++;
 		}
@@ -266,7 +284,7 @@ static int decoded_frame(
 		struct pimg n;
 		memcpy(n.planes, f0->data, sizeof(n.planes));
 		memcpy(n.strides, f0->linesize, sizeof(n.strides));
-		frame_cmp(f1, &n, &r->ssim, &r->psnr, ctx);
+		frame_cmp((const uint8_t *const *)f1->data, f1->linesize, &n, &r->ssim, &r->psnr, ctx);
 		if (r->ssim >= vid_diff_ssim)
 			r->page_idx = last_page;
 	}
@@ -281,7 +299,7 @@ static int decoded_frame(
 
 	if (r->page_idx < 0) {
 		mode = LOCATED;
-		locate(f0, ctx, last_page, ARRAY_SIZE(r), r);
+		locate((const uint8_t *const *)f0->data, f0->linesize, ctx, last_page, ARRAY_SIZE(r), r);
 		if (ctx->vid_dump_pat) {
 			struct pimg src;
 			memcpy(src.planes, f0->data, sizeof(src.planes));
@@ -292,7 +310,7 @@ static int decoded_frame(
 		}
 	} else {
 		mode = (!ctx->compress || ctx->tmp_page_idx == r->page_idx) ? REUSED0 : REUSED;
-		frame_render_cmp(f0, ctx, r->page_idx, &ctx->tmp,
+		frame_render_cmp((const uint8_t *const *)f0->data, f0->linesize, ctx, r->page_idx, &ctx->tmp,
 		                 &((struct loc_ctx *)ctx)->tmp_page_idx,
 		                 &r->ssim, &r->psnr);
 	}
@@ -300,7 +318,7 @@ static int decoded_frame(
 	for (unsigned i=0; i<(mode == LOCATED ? ARRAY_SIZE(r) : 1); i++)
 		fprintf(stderr, " -> %6.4f %7.3f page %d",
 			r[i].ssim, r[i].psnr, r[i].page_idx+1);
-	if (r->ssim < .3)
+	if (r->ssim < .4)
 		fprintf(stderr, " vague");
 	fprintf(stderr, "\n");
 	return r->page_idx;
@@ -452,7 +470,7 @@ static void render(
 	sws_freeContext(a.sws);
 }
 
-static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, double vid_diff_ssim)
+static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, const double *vid_diff_ssims)
 {
 	AVFrame *fr[2] = { av_frame_alloc(), av_frame_alloc(), };
 	if (!fr[0] || !fr[1])
@@ -460,7 +478,8 @@ static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, double vid_d
 
 	for (int frame_idx = 0, last_page = -1;
 	     ff_vinput_read_frame(vin, fr[frame_idx&1], frame_idx); frame_idx++)
-		last_page = decoded_frame(fr, frame_idx, ctx, last_page, vid_diff_ssim);
+		last_page = decoded_frame(fr, frame_idx, ctx, last_page,
+		                          last_page < 0 ? 0 : vid_diff_ssims[last_page-ctx->page_from]);
 
 	av_frame_free(fr+0);
 	av_frame_free(fr+1);
@@ -495,8 +514,14 @@ static void usage(const char *progname)
 	printf("\
 Options [defaults]:\n\
   -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]\n\
-  -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [%g]\n\
+  -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]\n\
+               (overrides -e)\n\
   -D DIR       dump rendered images into DIR (named PAGE-REN" PPM_SUFFIX ")\n\
+  -e RDIFF_TH  interpret consecutive frames as equal if SSIM >= RDIFF + TH where\n\
+               RDIFF is computed as max SSIM from this to another rendered\n\
+               frame and TH = (1-RDIFF)*RDIFF_TH, i.e. RDIFF_TH is the min.\n\
+               expected decrease of turbulence of VID frames wrt. RDIFF till\n\
+               which they're still not regarded as equal [%g]\n\
   -f PG_FROM   page interval start (1-based, inclusive) [1]\n\
   -h           display this help message\n\
   -r REN       use REN to render PDF [%s]\n\
@@ -505,7 +530,7 @@ Options [defaults]:\n\
   -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM" PPM_SUFFIX ")\n\
   -y           toggle compare luma plane only [YUV]\n\
 ",
-	       VPDF_SYNC_VID_DIFF_SSIM,
+	       VPDF_SYNC_RDIFF_TH,
 	       renderers[0].id,
 #ifdef HAVE_LZO
 	       "compress"
@@ -567,7 +592,8 @@ int main(int argc, char **argv)
 {
 	char *ren_id = NULL;
 	char *endptr;
-	double vid_diff_ssim = VPDF_SYNC_VID_DIFF_SSIM;
+	double vid_diff_ssim = -INFINITY;
+	double rdiff_th = VPDF_SYNC_RDIFF_TH;
 	char *ren_dump_dir = NULL;
 	char *vid_dump_dir = NULL;
 	int crop[4] = {0,0,0,0};
@@ -581,7 +607,7 @@ int main(int argc, char **argv)
 #endif
 	int opt;
 	struct stat st;
-	while ((opt = getopt(argc, argv, ":C:d:D:f:hr:t:uV:y")) != -1)
+	while ((opt = getopt(argc, argv, ":C:d:D:e:f:hr:t:uV:y")) != -1)
 		switch (opt) {
 		case 'C':
 			endptr = optarg;
@@ -601,6 +627,11 @@ int main(int argc, char **argv)
 				DIE(1, "unable to stat() '%s': %s\n", optarg, strerror(errno));
 			if (!S_ISDIR(st.st_mode))
 				DIE(1, "option -D expects path to a directory, '%s' is none\n", optarg);
+			break;
+		case 'e':
+			rdiff_th = strtof(optarg, &endptr);
+			if (*endptr)
+				DIE(1, "expected float parameter for option '-e'\n");
 			break;
 		case 'f':
 			page_from = strtol(optarg, &endptr, 10);
@@ -726,7 +757,32 @@ int main(int argc, char **argv)
 	render(&ctx, ren, ren_inst, crop);
 	ren->destroy(ren_inst);
 
-	run_vid_cmp(&vin, &ctx, vid_diff_ssim);
+	double vid_diff_ssims[page_to-page_from];
+	if (vid_diff_ssim >= -1) {
+		for (unsigned i=0; i<page_to-page_from; i++)
+			vid_diff_ssims[i] = vid_diff_ssim;
+	} else {
+		struct pimg diff_tmp = PIMG_INIT;
+		int diff_tmp_last_page_idx = -1;
+		if ((r = av_image_alloc(diff_tmp.planes, diff_tmp.strides,
+					w, h, ctx.pix_desc.pix_fmt, 1)) < 0)
+			DIE(1, "error allocating raw video buffer: %s", fferror(r));
+		for (int i=page_from; i<page_to; i++) {
+			struct res r[2];
+			const struct pimg *img = frame_render(&ctx, i, &diff_tmp, &diff_tmp_last_page_idx);
+			locate((const uint8_t *const *)img->planes, img->strides, &ctx, i, ARRAY_SIZE(r), r);
+			/* allow 12.5% (normalized) more turbulence in the
+			 * VID frame than required min. SSIM threshold to
+			 * closest matching rendered frame */
+			double rdiff = r[1].ssim;
+			vid_diff_ssims[i-page_from] = 1-(1-rdiff)*(1-rdiff_th);
+			fprintf(stderr, "page %d max ssim %6.4f -> vid_diff_ssim = %6.4f\n",
+			        i+1, rdiff, vid_diff_ssims[i-page_from]);
+		}
+		av_freep(diff_tmp.planes);
+	}
+
+	run_vid_cmp(&vin, &ctx, vid_diff_ssims);
 
 	if (ctx.pbuf) {
 		for (int i=0; i<page_to-page_from; i++)
