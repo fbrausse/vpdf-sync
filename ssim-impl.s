@@ -2,7 +2,7 @@
 
 	.p2align	5
 	.globl		mse
-	.type		mse, @function
+#	.type		mse, @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mse)
 ################################################################################
@@ -93,7 +93,7 @@ mse:
 
 	.p2align 5
 	.globl	covar_2
-	.type	covar_2, @function
+#	.type	covar_2, @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, const unsigned *mu, long long *covar)
 ################################################################################
@@ -229,7 +229,7 @@ covar_2:
 
 	.p2align 5
 	.globl	mu_var_2x8x8_2
-	.type	mu_var_2x8x8_2, @function
+#	.type	mu_var_2x8x8_2, @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mu, long *var)
 ################################################################################
@@ -398,7 +398,7 @@ mu_var_2x8x8_2:
 
 	.p2align 5
 	.globl	mu_var_2x8x8_2_covar
-	.type	mu_var_2x8x8_2_covar, @function
+#	.type	mu_var_2x8x8_2_covar, @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mu, long *var, long long *covar)
 ################################################################################

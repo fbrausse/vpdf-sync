@@ -22,7 +22,7 @@ struct vpdf_ren {
 	int    (*n_pages)(void *);
 	void   (*render )(void *, int page_from, int page_to,
 	                  const struct img_prep_args *img_prep_args);
-	enum PixelFormat fmt;
+	enum AVPixelFormat fmt;
 	int can_render;
 };
 
