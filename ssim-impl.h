@@ -21,7 +21,7 @@
 /* sums up all values of 2 horizontally adjacent 8x8 blocks into
  * 2 times a 16-bit value *u (lower half: first block) */
 
-#ifdef __SSE2__
+#ifdef __x86_64__
 /* u: 64 * mean
  * s: 64^2 * variance
  *
