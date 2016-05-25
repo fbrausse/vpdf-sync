@@ -522,10 +522,10 @@ Options [defaults]:\n\
                frame and TH = (1-RDIFF)*RDIFF_TH, i.e. RDIFF_TH is the min.\n\
                expected decrease of turbulence of VID frames wrt. RDIFF till\n\
                which they're still not regarded as equal [%g]\n\
-  -f PG_FROM   page interval start (1-based, inclusive) [1]\n\
   -h           display this help message\n\
+  -p FROM:TO   interval of pages to render (1-based, inclusive, each),\n\
+               FROM and TO can both be empty [1:page-num]\n\
   -r REN       use REN to render PDF [%s]\n\
-  -t PG_TO     page interval stop (1-based, inclusive) [page-num]\n\
   -u           don't compress pages (watch out for OOM) [%s]\n\
   -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM" PPM_SUFFIX ")\n\
   -y           toggle compare luma plane only [YUV]\n\
@@ -614,7 +614,7 @@ int main(int argc, char **argv)
 #endif
 	int opt;
 	struct stat st;
-	while ((opt = getopt(argc, argv, ":C:d:D:e:f:hr:t:uV:y")) != -1)
+	while ((opt = getopt(argc, argv, ":C:d:D:e:hp:r:uV:y")) != -1)
 		switch (opt) {
 		case 'C':
 			endptr = optarg;
@@ -622,6 +622,8 @@ int main(int argc, char **argv)
 				crop[i] = strtol(endptr, &endptr, 10);
 				if (*endptr++ != (i == 3 ? '\0' : ':'))
 					DIE(1, "option -C expects format to be T:B:L:R\n");
+				if (crop[i] < 0)
+					DIE(1, "option -C requires non-negative integer parameters\n");
 			}
 			break;
 		case 'd':
@@ -640,21 +642,21 @@ int main(int argc, char **argv)
 			if (*endptr)
 				DIE(1, "expected float parameter for option '-e'\n");
 			break;
-		case 'f':
-			page_from = strtol(optarg, &endptr, 10);
-			if (*endptr || page_from-- <= 0)
-				DIE(1, "expected positive decimal parameter for option '-f'\n");
-			break;
 		case 'h':
 			usage(argv[0]);
 			exit(0);
+		case 'p':
+			page_from = strtol(optarg, &endptr, 10);
+			if (*endptr++ != ':')
+				DIE(1, "option -p requires a colon-separated range\n");
+			if (page_from-- <= 0)
+				DIE(1, "expected positive decimal parameter or nothing for FROM in option '-p'\n");
+			page_to = strtol(endptr, &endptr, 10);
+			if (*endptr || page_to <= 0)
+				DIE(1, "expected positive decimal parameter or nothing for TO in option '-p'\n");
+			break;
 		case 'r':
 			ren_id = optarg;
-			break;
-		case 't':
-			page_to = strtol(optarg, &endptr, 10);
-			if (*endptr || page_to <= 0)
-				DIE(1, "expected positive decimal parameter for option '-t'\n");
 			break;
 		case 'u': compress = 0; break;
 		case 'V':
@@ -718,6 +720,11 @@ int main(int argc, char **argv)
 		DIE(1, "error: SSIM/PSNR computation only works for VID planes "
 		       "being dimensioned as multiples of 8\n");
 
+	if (crop[0]+crop[1] >= h || crop[2]+crop[3] >= w)
+		DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
+		       "for %ux%u images\n",
+		    crop[0], crop[1], crop[2], crop[3], w, h);
+
 	void *ren_inst = ren->create(argc, argv, w-crop[2]-crop[3], h-crop[0]-crop[1]);
 	if (!ren_inst)
 		DIE(1, "error creating renderer '%s': check its params\n", ren_id);
@@ -725,6 +732,9 @@ int main(int argc, char **argv)
 
 	if (page_to < 0 || page_to > n_pages)
 		page_to = n_pages;
+	if (page_from > page_to)
+		DIE(1, "error: range [%d,%d] of pages to render is empty\n",
+		    page_from+1, page_to);
 	n_pages = page_to - page_from;
 	struct cimg *imgs[n_pages];
 	struct loc_ctx ctx = {
