@@ -273,7 +273,7 @@ static void ppm_export(
 #undef FCLOSE
 }
 
-static int decoded_frame(
+static struct res decoded_frame(
 	AVFrame *fr[static 2], int frame_idx, const struct loc_ctx *ctx,
 	int last_page, double vid_diff_ssim
 ) {
@@ -321,7 +321,51 @@ static int decoded_frame(
 	if (r->ssim < .4)
 		fprintf(stderr, " vague");
 	fprintf(stderr, "\n");
-	return r->page_idx;
+	return r[0];
+}
+
+struct res_item {
+	struct res_item *next;
+	int frame_idx[2]; /* interval */
+	double ssim[2]; /* interval */
+	int page;
+};
+
+static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, const double *vid_diff_ssims)
+{
+	struct res_item *head = NULL, *t = NULL, **tailp = &head;
+	struct res r = RES_INIT;
+
+	AVFrame *fr[2] = { av_frame_alloc(), av_frame_alloc(), };
+	if (!fr[0] || !fr[1])
+		DIE(1, "error allocating AVFrame: %s\n", strerror(errno));
+
+	for (int frame_idx = 0; ff_vinput_read_frame(vin, fr[frame_idx&1], frame_idx); frame_idx++) {
+		r = decoded_frame(fr, frame_idx, ctx, r.page_idx,
+		                  r.page_idx < 0 ? 0 : vid_diff_ssims[r.page_idx-ctx->page_from]);
+		if (t && t->page == r.page_idx) {
+			t->frame_idx[1] = frame_idx;
+			t->ssim[0] = MIN(t->ssim[0], r.ssim);
+			t->ssim[1] = MAX(t->ssim[1], r.ssim);
+		} else if (t) {
+			printf("frames %5u to %5u show page %4d w/ ssim %6.4f to %6.4f\n",
+			       t->frame_idx[0], t->frame_idx[1], t->page, t->ssim[0], t->ssim[1]);
+			t = NULL;
+		}
+		if (!t) {
+			*tailp = t = malloc(sizeof(*t));
+			tailp = &t->next;
+			t->next = NULL;
+			t->page = r.page_idx;
+			memcpy(t->frame_idx, ((int[2]){ frame_idx, frame_idx }), sizeof(t->frame_idx));
+			memcpy(t->ssim, ((double[2]){ r.ssim, r.ssim }), sizeof(t->ssim));
+		}
+	}
+
+	av_frame_free(fr+0);
+	av_frame_free(fr+1);
+
+	return head;
 }
 
 struct img_prep_args {
@@ -468,21 +512,6 @@ static void render(
 	ren->render(ren_inst, ctx->page_from, ctx->page_to, &a);
 
 	sws_freeContext(a.sws);
-}
-
-static void run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, const double *vid_diff_ssims)
-{
-	AVFrame *fr[2] = { av_frame_alloc(), av_frame_alloc(), };
-	if (!fr[0] || !fr[1])
-		DIE(1, "error allocating AVFrame: %s\n", strerror(errno));
-
-	for (int frame_idx = 0, last_page = -1;
-	     ff_vinput_read_frame(vin, fr[frame_idx&1], frame_idx); frame_idx++)
-		last_page = decoded_frame(fr, frame_idx, ctx, last_page,
-		                          last_page < 0 ? 0 : vid_diff_ssims[last_page-ctx->page_from]);
-
-	av_frame_free(fr+0);
-	av_frame_free(fr+1);
 }
 
 extern struct vpdf_ren vpdf_ren_poppler_glib;
@@ -799,7 +828,12 @@ int main(int argc, char **argv)
 		av_freep(diff_tmp.planes);
 	}
 
-	run_vid_cmp(&vin, &ctx, vid_diff_ssims);
+	struct res_item *ivals = run_vid_cmp(&vin, &ctx, vid_diff_ssims);
+
+	for (struct res_item *i; (i = ivals);) {
+		ivals = i->next;
+		free(i);
+	}
 
 	if (ctx.pbuf) {
 		for (int i=0; i<page_to-page_from; i++)
