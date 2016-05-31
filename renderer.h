@@ -28,7 +28,7 @@ struct vpdf_ren {
 
 void vpdf_image_prepare(
 	struct vpdf_image *img, const struct img_prep_args *img_prep_args,
-	unsigned page_idx
+	unsigned page_idx, char *label
 );
 
 C_NAMESPACE_END

@@ -17,6 +17,10 @@
 # define VPDF_SYNC_SSIM_VAGUE		.4
 #endif
 
+#ifndef VPDF_SYNC_SSIM_EXACT
+# define VPDF_SYNC_SSIM_EXACT		.95
+#endif
+
 #ifndef PLANE_CMP2_EXTRA_FLAGS
 # define PLANE_CMP2_EXTRA_FLAGS		0
 #endif
@@ -79,6 +83,7 @@ static void pix_desc_init(struct pix_desc *desc, enum AVPixelFormat pix_fmt)
 
 struct loc_ctx {
 	int w, h;
+	char **labels;
 	struct cimg **buf;
 	struct pimg *pbuf;
 	struct pimg tmp, vid_ppm;
@@ -394,10 +399,15 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 			t->ssim[0] = MIN(t->ssim[0], r.ssim);
 			t->ssim[1] = MAX(t->ssim[1], r.ssim);
 		} else if (t) {
-			printf("%s - %s frames %5u to %5u show page %4d w/ ssim %6.4f to %6.4f\n",
+			char *label = ctx->labels[t->page_idx - ctx->page_from];
+			printf("%s - %s frames %5u to %5u show page %4d (%s) w/ ssim %6.4f to %6.4f %s\n",
 			       ts_str_fmt((char[TS_STR_MAX]){0}, vin->vid_stream->time_base, t->frame_pts[0]),
 			       ts_str_fmt((char[TS_STR_MAX]){0}, vin->vid_stream->time_base, t->frame_pts[1]),
-			       t->frame_idx[0], t->frame_idx[1], t->page_idx+1, t->ssim[0], t->ssim[1]);
+			       t->frame_idx[0], t->frame_idx[1], t->page_idx+1,
+			       label ? label : "", t->ssim[0], t->ssim[1],
+			       t->ssim[0] < VPDF_SYNC_SSIM_VAGUE ? "vague" :
+			       t->ssim[1] < VPDF_SYNC_SSIM_EXACT ? "fuzzy" :
+			                                           "exact");
 			t = NULL;
 		}
 		if (!t) {
@@ -436,7 +446,8 @@ struct img_prep_args {
 static const uint8_t black[][4] = { { 0,0,0,0 }, { 0x10,0x80,0x80,0x00 }, };
 
 void vpdf_image_prepare(
-	struct vpdf_image *img, const struct img_prep_args *a, unsigned page_idx
+	struct vpdf_image *img, const struct img_prep_args *a,
+	unsigned page_idx, char *label
 ) {
 	int s = img->s;
 	const uint8_t *data = img->data;
@@ -525,6 +536,8 @@ void vpdf_image_prepare(
 		a->ctx->buf[page_idx - a->ctx->page_from] = c;
 #endif
 	}
+
+	a->ctx->labels[page_idx - a->ctx->page_from] = label;
 
 	if (a->ctx->verbosity > 0) {
 		fprintf(stderr, "\n");
@@ -626,7 +639,14 @@ Options [defaults]:\n\
 	       "don't compress"
 #endif
 	);
-
+	printf("\n");
+	printf("\
+Classification of match certainty:\n\
+  'exact' when SSIM >= %-4g (pretty much sure),\n\
+  'vague' when SSIM <  %-4g (most probably no match found in page range),\n\
+  'fuzzy' otherwise         (match unclear, try adjusting '-C')\n\
+",
+	       VPDF_SYNC_SSIM_EXACT, VPDF_SYNC_SSIM_VAGUE);
 	for (unsigned i=0; i<ARRAY_SIZE(renderers); i++) {
 		printf("\n");
 		char *ren_argv[] = { renderers[i].id, "-h" };
@@ -836,8 +856,10 @@ int main(int argc, char **argv)
 		    page_from+1, page_to);
 	n_pages = page_to - page_from;
 	struct cimg *imgs[n_pages];
+	char *labels[n_pages];
+	memset(labels, 0, sizeof(labels));
 	struct loc_ctx ctx = {
-		w, h, NULL, NULL, PIMG_INIT, PIMG_INIT, NULL,
+		w, h, labels, NULL, NULL, PIMG_INIT, PIMG_INIT, NULL,
 		-1, page_from, page_to, PIX_DESC_INIT,
 		NULL,
 		NULL,
@@ -914,6 +936,8 @@ int main(int argc, char **argv)
 		for (unsigned i=0; i<ARRAY_SIZE(imgs); i++)
 			free(imgs[i]);
 	}
+	for (int i=0; i<page_to-page_from; i++)
+		free(ctx.labels[i]);
 
 	if (ctx.vid_sws) {
 		sws_freeContext(ctx.vid_sws);

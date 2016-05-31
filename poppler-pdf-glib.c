@@ -60,7 +60,7 @@ static void render(void *_ren, int page_from, int page_to, const struct img_prep
 
 		g_object_unref(page);
 
-		vpdf_image_prepare(&img, img_prep_args, page_idx);
+		vpdf_image_prepare(&img, img_prep_args, page_idx, poppler_page_get_label(page));
 	}
 }
 

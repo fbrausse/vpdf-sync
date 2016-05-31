@@ -70,7 +70,8 @@ static int display_page(void *handle, void *device, int copies, int flush)
 	fprintf(stderr, "%s(copies=%d, flush=%d)\n", __func__, copies, flush);
 */
 	struct dsp *d = handle;
-	vpdf_image_prepare(&d->img, d->img_prep_args, d->page_idx++);
+	vpdf_image_prepare(&d->img, d->img_prep_args, d->page_idx++,
+	                   NULL /* TODO */);
 	return 0;
 }
 

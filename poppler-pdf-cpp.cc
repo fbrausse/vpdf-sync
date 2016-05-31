@@ -125,16 +125,23 @@ static void render(
 		                                 POPPLER_CPP_DPI*ha,
 		                              MAX(r.width() * wa, 0) / 2,
 		                              MAX(r.height() * ha, 0) / 2);
+
+		auto s = p->label().to_utf8();
+		char *t = (char *)malloc(s.size()+1);
+		memcpy(t, s.data(), s.size());
+		t[s.size()] = '\0';
+
 		delete p;
 		struct vpdf_image img = {
 			(unsigned char *)pi.const_data(),
 			(unsigned)pi.width(), (unsigned)pi.height(),
 			(unsigned)pi.bytes_per_row()
 		};
+
 #ifdef _OPENMP
 # pragma omp critical
 #endif
-		vpdf_image_prepare(&img, img_prep_args, page_idx);
+		vpdf_image_prepare(&img, img_prep_args, page_idx, t);
 	}
 }
 
