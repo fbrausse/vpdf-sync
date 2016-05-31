@@ -26,13 +26,14 @@ averages, variances and covariances of pixels in an 8x8 pixel block.
 
 A sample output looks like this:
 
-	00:00:00.02 - 00:00:12.92 frames     0 to   129 show page  859 w/ ssim 0.9878 to 0.9880
-	00:00:13.02 - 00:02:02.02 frames   130 to  1220 show page  860 w/ ssim 0.9832 to 0.9846
-	00:02:02.12 - 00:03:17.62 frames  1221 to  1976 show page  861 w/ ssim 0.9839 to 0.9853
-	00:03:17.72 - 00:03:55.22 frames  1977 to  2352 show page  862 w/ ssim 0.9838 to 0.9848
-	00:03:55.32 - 00:04:23.72 frames  2353 to  2637 show page  863 w/ ssim 0.9836 to 0.9847
-	00:04:23.82 - 00:04:35.82 frames  2638 to  2758 show page  864 w/ ssim 0.9841 to 0.9851
-	00:04:35.92 - 00:05:26.82 frames  2759 to  3268 show page  865 w/ ssim 0.9843 to 0.9853
+	00:00:00.02 - 00:00:38.52 frames     0 to   385 show page  619 (78) w/ ssim 0.9327 to 0.9758 exact
+	00:00:38.62 - 00:01:18.72 frames   386 to   787 show page  620 (79) w/ ssim 0.9691 to 0.9710 exact
+	00:01:18.82 - 00:01:36.92 frames   788 to   969 show page  621 (79) w/ ssim 0.9684 to 0.9691 exact
+	00:01:37.02 - 00:01:37.52 frames   970 to   975 show page  757 (92) w/ ssim 0.1524 to 0.1604 vague
+	00:01:37.62 - 00:01:38.92 frames   976 to   989 show page  689 (86) w/ ssim 0.1693 to 0.1831 vague
+	00:01:39.02 - 00:02:00.72 frames   990 to  1207 show page  757 (92) w/ ssim 0.1607 to 0.2529 vague
+	00:02:00.82 - 00:02:03.02 frames  1208 to  1230 show page  621 (79) w/ ssim 0.9682 to 0.9691 exact
+	00:02:03.12 - 00:02:16.52 frames  1231 to  1365 show page  622 (79) w/ ssim 0.9677 to 0.9678 exact
 
 ### Difficulties
 The currently only supported slide format is PDF. Due to multiple possible
@@ -73,3 +74,44 @@ Steps 1, 2 and 3 are parallelized (if OpenMP is used) and typically take a
 minute or two on recent hardware. Main memory consumption is about 80 MiB
 for 100 slides @1024x768 and 200 MiB for 1000 slides (lzo-compressed) (160
 MiB or 1.2 GiB respectively for uncompressed memory storage).
+
+## Usage info
+```
+usage: ./vpdf-sync [-OPTS] [--] VID REN_OPTS...
+
+Options [defaults]:
+  -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]
+  -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]
+               (overrides -e)
+  -D DIR       dump rendered images into DIR (named PAGE-REN.ppm.gz)
+  -e RDIFF_TH  interpret consecutive frames as equal if SSIM >= RDIFF + TH where
+               RDIFF is computed as max SSIM from this to another rendered
+               frame and TH = (1-RDIFF)*RDIFF_TH, i.e. RDIFF_TH is the min.
+               expected decrease of turbulence of VID frames wrt. RDIFF till
+               which they're still not regarded as equal [0.125]
+  -h           display this help message
+  -p FROM:TO   interval of pages to render (1-based, inclusive, each),
+               FROM and TO can both be empty [1:page-num]
+  -r REN       use REN to render PDF [poppler-cairo]
+  -u           don't compress pages (watch out for OOM) [compress]
+  -v           increase verbosity
+  -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM.ppm.gz)
+  -y           toggle compare luma plane only [YUV]
+
+Classification of match certainty:
+  'exact' when SSIM >= 0.95 (pretty much sure),
+  'vague' when SSIM <  0.4  (most probably no match found in page range),
+  'fuzzy' otherwise         (match unclear, try adjusting '-C')
+
+Renderer 'poppler-cairo' [can render: yes] usage: [-k PASSWD] [--] PDF-PATH
+  -k PASSWD    use PASSWD to open protected PDF [(unset)]
+
+Renderer 'poppler-splash' [can render: yes] usage: [-k PASSWD] [-astT] [--] PDF-PATH
+  -a           disable graphics anti-aliasing
+  -k PASSWD    use PASSWD to open protected PDF [(unset)]
+  -s           disable preservation of aspect ratio
+  -t           disable text anti-aliasing
+  -T           disable text hinting
+
+Renderer 'ghostscript' [can render: yes] usage: [--] PDF-PATH
+```
