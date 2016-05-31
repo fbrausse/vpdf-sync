@@ -92,6 +92,257 @@ mse:
 	movd		%xmm0, (%rcx)
 	ret
 
+
+
+	.p2align 5
+	.globl	covar_1
+#	.type	covar_1, @function
+################################################################################
+# int32_t(const void *in1, const void *in2, uint32_t stride, uint32_t *mean)
+################################################################################
+covar_1:
+	lea		(%rdx,%rdx,2), %r8	# 3*stride
+
+	movq		(%rdi       ), %xmm0
+	movq		(%rdi,%rdx  ), %xmm1
+	movq		(%rdi,%rdx,2), %xmm2
+	movq		(%rdi,%r8   ), %xmm3
+
+	movq		(%rsi       ), %xmm4
+	movq		(%rsi,%rdx  ), %xmm5
+	movq		(%rsi,%rdx,2), %xmm6
+	movq		(%rsi,%r8   ), %xmm7
+
+	movdqa		%xmm0, %xmm12
+	movdqa		%xmm1, %xmm13
+	punpcklqdq	%xmm4, %xmm12
+	punpcklqdq	%xmm5, %xmm13
+	movdqa		%xmm2, %xmm14
+	movdqa		%xmm3, %xmm15
+	punpcklqdq	%xmm6, %xmm14
+	punpcklqdq	%xmm7, %xmm15
+
+	pxor		%xmm8, %xmm8
+
+	# 11u, 8.3
+	psadbw		%xmm8, %xmm12
+	psadbw		%xmm8, %xmm13
+	psadbw		%xmm8, %xmm14
+	psadbw		%xmm8, %xmm15
+
+	punpcklbw	%xmm8, %xmm0
+	punpcklbw	%xmm8, %xmm1
+	punpcklbw	%xmm8, %xmm2
+	punpcklbw	%xmm8, %xmm3
+	punpcklbw	%xmm8, %xmm4
+	punpcklbw	%xmm8, %xmm5
+	punpcklbw	%xmm8, %xmm6
+	punpcklbw	%xmm8, %xmm7
+
+	# 17u, 8.9
+	pmaddwd		%xmm4, %xmm0
+	pmaddwd		%xmm5, %xmm1
+	pmaddwd		%xmm6, %xmm2
+	pmaddwd		%xmm7, %xmm3
+
+	paddq		%xmm13, %xmm12	# 12u
+	paddq		%xmm15, %xmm14	# 12u
+	paddd		%xmm1, %xmm0	# 18u, 8.10
+	paddd		%xmm3, %xmm2	# 18u
+	paddq		%xmm14, %xmm12	# 13u
+	paddd		%xmm2, %xmm0	# 19u, 8.11
+
+	movdqa		%xmm0, %xmm9
+	movdqa		%xmm12, %xmm10
+
+
+	lea		(%rdi,%rdx,4), %rdi
+	lea		(%rsi,%rdx,4), %rsi
+
+	movq		(%rdi       ), %xmm0
+	movq		(%rdi,%rdx  ), %xmm1
+	movq		(%rdi,%rdx,2), %xmm2
+	movq		(%rdi,%r8   ), %xmm3
+
+	movq		(%rsi       ), %xmm4
+	movq		(%rsi,%rdx  ), %xmm5
+	movq		(%rsi,%rdx,2), %xmm6
+	movq		(%rsi,%r8   ), %xmm7
+
+	movdqa		%xmm0, %xmm12
+	movdqa		%xmm1, %xmm13
+	punpcklqdq	%xmm4, %xmm12
+	punpcklqdq	%xmm5, %xmm13
+	movdqa		%xmm2, %xmm14
+	movdqa		%xmm3, %xmm15
+	punpcklqdq	%xmm6, %xmm14
+	punpcklqdq	%xmm7, %xmm15
+
+	pxor		%xmm8, %xmm8
+
+	# 11u
+	psadbw		%xmm8, %xmm12
+	psadbw		%xmm8, %xmm13
+	psadbw		%xmm8, %xmm14
+	psadbw		%xmm8, %xmm15
+
+	punpcklbw	%xmm8, %xmm0
+	punpcklbw	%xmm8, %xmm1
+	punpcklbw	%xmm8, %xmm2
+	punpcklbw	%xmm8, %xmm3
+	punpcklbw	%xmm8, %xmm4
+	punpcklbw	%xmm8, %xmm5
+	punpcklbw	%xmm8, %xmm6
+	punpcklbw	%xmm8, %xmm7
+
+	# 4x 17u, 16.1
+	pmaddwd		%xmm4, %xmm0
+	pmaddwd		%xmm5, %xmm1
+	pmaddwd		%xmm6, %xmm2
+	pmaddwd		%xmm7, %xmm3
+
+	paddq		%xmm13, %xmm12	# 2x 12u
+	paddq		%xmm15, %xmm14	# 2x 12u
+	paddq		%xmm14, %xmm12	# 2x 13u
+
+	paddd		%xmm1, %xmm0	# 4x 18u
+	paddd		%xmm3, %xmm2	# 4x 18u
+	paddd		%xmm2, %xmm0	# 4x 19u, 16.3
+
+	paddq		%xmm12, %xmm10		# 2x 14u, 8.6
+	paddd		%xmm0, %xmm9		# 4x 20u, 16.4
+	pshufd		$0x4e, %xmm9, %xmm0
+	paddd		%xmm0, %xmm9		# 2*2x 21u, 16.5
+	pshufd		$0xb1, %xmm9, %xmm0
+	paddd		%xmm0, %xmm9		# 4*1x 22u, 16.6
+
+	pshufd		$0xfe, %xmm10, %xmm11
+	movdqa		%xmm10, %xmm1
+	punpcklwd	%xmm11, %xmm1
+	movd		%xmm1, (%rcx)
+	pmuludq		%xmm11, %xmm10		# 1x 28u, 16.12
+	pslld		$6, %xmm9		# 4*1x 28u, 16.12
+	psubd		%xmm10, %xmm9		# 1x 28s, 16.12
+
+	movd		%xmm9, %eax
+	ret
+
+	.p2align 5
+	.globl	var_1
+#	.type	var_1, @function
+################################################################################
+# int64_t(const void *in1, const void *in2, unsigned stride, uint32_t mu)
+################################################################################
+var_1:
+	pxor		%xmm8, %xmm8
+
+	movd		%rcx, %xmm9		# 2 [ 00 .. 00  µy µx ]
+	punpcklwd	%xmm8, %xmm9		# 4 [ 00 00    µy µx   ]
+	pmaddwd		%xmm9, %xmm9		# 4 [ 00 00  µy^2 µx^2 ]
+
+	lea		(%rdx,%rdx,2), %rcx
+
+	movq		(%rdi       ), %xmm0
+	movq		(%rdi,%rdx  ), %xmm1
+	movq		(%rdi,%rdx,2), %xmm2
+	movq		(%rdi,%rcx  ), %xmm3
+
+	punpcklbw	%xmm8, %xmm0
+	punpcklbw	%xmm8, %xmm1
+	punpcklbw	%xmm8, %xmm2
+	punpcklbw	%xmm8, %xmm3
+
+	pmaddwd		%xmm0, %xmm0
+	pmaddwd		%xmm1, %xmm1
+	pmaddwd		%xmm2, %xmm2
+	pmaddwd		%xmm3, %xmm3
+
+	lea		(%rdi,%rdx,4), %rdi
+
+	movq		(%rdi       ), %xmm4
+	movq		(%rdi,%rdx  ), %xmm5
+	movq		(%rdi,%rdx,2), %xmm6
+	movq		(%rdi,%rcx  ), %xmm7
+
+	punpcklbw	%xmm8, %xmm4
+	punpcklbw	%xmm8, %xmm5
+	punpcklbw	%xmm8, %xmm6
+	punpcklbw	%xmm8, %xmm7
+
+	pmaddwd		%xmm4, %xmm4
+	pmaddwd		%xmm5, %xmm5
+	pmaddwd		%xmm6, %xmm6
+	pmaddwd		%xmm7, %xmm7
+
+	movq		(%rsi       ), %xmm12
+	movq		(%rsi,%rdx  ), %xmm13
+	movq		(%rsi,%rdx,2), %xmm14
+	movq		(%rsi,%rcx  ), %xmm15
+
+	punpcklbw	%xmm8, %xmm12
+	punpcklbw	%xmm8, %xmm13
+	punpcklbw	%xmm8, %xmm14
+	punpcklbw	%xmm8, %xmm15
+
+	pmaddwd		%xmm12, %xmm12
+	pmaddwd		%xmm13, %xmm13
+	pmaddwd		%xmm14, %xmm14
+	pmaddwd		%xmm15, %xmm15
+
+	paddd		%xmm4, %xmm0
+	paddd		%xmm5, %xmm1
+	paddd		%xmm6, %xmm2
+	paddd		%xmm7, %xmm3
+
+	lea		(%rsi,%rdx,4), %rsi
+
+	movq		(%rsi       ), %xmm4
+	movq		(%rsi,%rdx  ), %xmm5
+	movq		(%rsi,%rdx,2), %xmm6
+	movq		(%rsi,%rcx  ), %xmm7
+
+	punpcklbw	%xmm8, %xmm4
+	punpcklbw	%xmm8, %xmm5
+	punpcklbw	%xmm8, %xmm6
+	punpcklbw	%xmm8, %xmm7
+
+	pmaddwd		%xmm4, %xmm4
+	pmaddwd		%xmm5, %xmm5
+	pmaddwd		%xmm6, %xmm6
+	pmaddwd		%xmm7, %xmm7
+
+	paddd		%xmm1, %xmm0
+	paddd		%xmm3, %xmm2
+
+	paddd		%xmm12, %xmm4
+	paddd		%xmm13, %xmm5
+	paddd		%xmm14, %xmm6
+	paddd		%xmm15, %xmm7
+
+	paddd		%xmm2, %xmm0
+
+	paddd		%xmm5, %xmm4
+	paddd		%xmm7, %xmm6
+
+	pshufd		$0x4e, %xmm0, %xmm2
+	paddd		%xmm6, %xmm4
+	paddd		%xmm2, %xmm0
+	pshufd		$0x4e, %xmm4, %xmm6
+	pshufd		$0xb1, %xmm0, %xmm2
+	paddd		%xmm6, %xmm4
+	paddd		%xmm2, %xmm0
+	pshufd		$0xb1, %xmm4, %xmm6
+	paddd		%xmm6, %xmm4
+
+	punpckldq	%xmm4, %xmm0
+	pslld		$6, %xmm0
+	psubd		%xmm9, %xmm0
+	movq		%xmm0, %rax
+
+	ret
+
+
+
 	.p2align 5
 	.globl	covar_2
 #	.type	covar_2, @function
@@ -674,20 +925,17 @@ mu_var_2x8x8_2_covar:
 	# 19.12s
 	paddd		%xmm3, %xmm1
 
-	# all 32 bits are used in xmm4, so we have to sign-extend into quads
+	# all 32 bits are used in xmm1, so we have to sign-extend into quads
 	pcmpgtd		%xmm1, %xmm8		# xmm1_i < 0 ? -1 : 0
 
-
-
-
-	movdqa		%xmm4, %xmm5
+	movdqa		%xmm1, %xmm5
 	punpckhdq	%xmm8, %xmm5
-	punpckldq	%xmm8, %xmm4
+	punpckldq	%xmm8, %xmm1
 
-	paddq		%xmm5, %xmm4
-	pshufd		$0x4e, %xmm4, %xmm5
-	paddq		%xmm5, %xmm4
-	movq		%xmm4, (%r8)
+	paddq		%xmm5, %xmm1
+	pshufd		$0x4e, %xmm1, %xmm5
+	paddq		%xmm5, %xmm1
+	movq		%xmm1, (%r8)
 
 	ret
 

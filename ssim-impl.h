@@ -32,8 +32,11 @@
  */
 void mu_var_2x8x8_2(const void *in1, const void *in2, uint32_t stride, uint32_t *u, int64_t *s);
 /* mu = 64 * µ => kv = 64^3 * s_{f0,f1} (28 bit = 10.18 fixed-point) */
+int32_t covar_1(const void *in1, const void *in2, uint32_t stride, uint32_t *mean);
+int64_t var_1(const void *in1, const void *in2, uint32_t stride, uint32_t mean);
 void covar_2(const void *in1, const void *in2, uint32_t stride, const uint32_t *mu, int64_t *covar);
 void mse(const void *in1, const void *in2, uint32_t stride, uint32_t *mse);
+void mu_var_2x8x8_2_covar(const void *in1, const void *in2, uint32_t stride, uint32_t *mu, int64_t *var, int64_t *covar);
 unsigned sad_16x16(const void *in1, const void *in2, uint32_t stride);
 #endif
 
@@ -63,6 +66,14 @@ static inline void plane_cmp2(
 	int64_t s2 = 0, cv = 0;
 	for (unsigned j=0; j<h; j+=8, a += 8*stride, b += 8*stride)
 		for (unsigned i=0; i<w; i+=8) {
+#if 1
+			if (flags & PLANE_CMP2_SSIM) {
+				cv = (int64_t)covar_1(a + i, b + i, stride, &mean) << 6;
+				s2 = var_1(a + i, b + i, stride, mean);
+			}
+			if (flags & PLANE_CMP2_PSNR)
+				mse(a + i, b + i, stride, &_mse);
+#else
 			if (flags & PLANE_CMP2_SSIM)
 				mu_var_2x8x8_2(a + i, b + i, stride, &mean, &s2);
 #if 1
@@ -76,6 +87,7 @@ static inline void plane_cmp2(
 				_mse = cv >> 32;
 				cv = (int32_t)cv;
 			}
+#endif
 #endif
 			cnt2_done(c, mean, cv, s2, _mse);
 		}
