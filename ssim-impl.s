@@ -1,3 +1,4 @@
+
 	.text
 
 	.p2align	5
@@ -733,4 +734,97 @@ mu_var_2x8x8_2_covar:
 	movq		%xmm10, (%r8)
 
 	# clobbered rdx and r9, but these are caller-saved
+	ret
+
+
+	.p2align	5
+	.globl		sad_8x8
+#	.type		sad, @function
+################################################################################
+# unsigned(const void *in1, const void *in2, unsigned stride)
+################################################################################
+sad_16x16:
+	lea		(%rdx,%rdx,2),	%rcx	# 3*stride
+	lea		(%rdi,%rcx),	%r9	# in1+3*stride
+
+	movdqu		(%rdi),		%xmm0
+	movdqu		(%rdi,%rdx,1),	%xmm1
+	movdqu		(%rdi,%rdx,2),	%xmm2
+	movdqu		(%r9),		%xmm3
+	movdqu		(%rdi,%rdx,4),	%xmm4
+	movdqu		(%r9,%rdx,2),	%xmm5
+	movdqu		(%r9,%rcx),	%xmm6
+	movdqu		(%r9,%rdx,4),	%xmm7
+
+	lea		(%rsi,%rcx),	%r9	# in2+3*stride
+
+	psadbw		(%rsi),		%xmm0
+	psadbw		(%rsi,%rdx,1),	%xmm1
+	psadbw		(%rsi,%rdx,2),	%xmm2
+	psadbw		(%r9),		%xmm3
+	psadbw		(%rsi,%rdx,4),	%xmm4
+	psadbw		(%r9,%rdx,2),	%xmm5
+	psadbw		(%r9,%rcx),	%xmm6
+	psadbw		(%r9,%rdx,4),	%xmm7
+
+	paddq		%xmm4,		%xmm0
+	paddq		%xmm5,		%xmm1
+	paddq		%xmm6,		%xmm2
+	paddq		%xmm7,		%xmm3
+
+	lea		(%rdi,%rdx,8),	%rdi
+	lea		(%rsi,%rdx,8),	%rsi
+
+	movdqu		(%rdi),		%xmm4
+	movdqu		(%rdi,%rdx,1),	%xmm5
+	movdqu		(%rdi,%rdx,2),	%xmm6
+	movdqu		(%rdi,%rcx),	%xmm7
+
+	psadbw		(%rsi),		%xmm4
+	psadbw		(%rsi,%rdx,1),	%xmm5
+	psadbw		(%rsi,%rdx,2),	%xmm6
+	psadbw		(%rsi,%rcx),	%xmm7
+
+	paddq		%xmm4,		%xmm0
+	paddq		%xmm5,		%xmm1
+	paddq		%xmm6,		%xmm2
+	paddq		%xmm7,		%xmm3
+
+	lea		(%rdi,%rdx,4),	%rdi
+	lea		(%rsi,%rdx,4),	%rsi
+
+	movdqu		(%rdi),		%xmm4
+	movdqu		(%rdi,%rdx,1),	%xmm5
+	movdqu		(%rdi,%rdx,2),	%xmm6
+	movdqu		(%rdi,%rcx),	%xmm7
+
+	psadbw		(%rsi),		%xmm4
+	psadbw		(%rsi,%rdx,1),	%xmm5
+	psadbw		(%rsi,%rdx,2),	%xmm6
+	psadbw		(%rsi,%rcx),	%xmm7
+
+	paddq		%xmm4,		%xmm0
+	paddq		%xmm5,		%xmm1
+	paddq		%xmm6,		%xmm2
+	paddq		%xmm7,		%xmm3
+
+	movdqa		%xmm0,		%xmm4
+	movdqa		%xmm1,		%xmm5
+	punpckhqdq	%xmm4,		%xmm4
+	punpckhqdq	%xmm5,		%xmm5
+	movdqa		%xmm2,		%xmm6
+	movdqa		%xmm3,		%xmm7
+	punpckhqdq	%xmm6,		%xmm6
+	punpckhqdq	%xmm7,		%xmm7
+
+	paddd		%xmm4,		%xmm0
+	paddd		%xmm5,		%xmm1
+	paddd		%xmm6,		%xmm2
+	paddd		%xmm7,		%xmm3
+
+	paddd		%xmm1,		%xmm0
+	paddd		%xmm3,		%xmm2
+	paddd		%xmm2,		%xmm0
+
+	movd		%xmm0,		%eax
 	ret

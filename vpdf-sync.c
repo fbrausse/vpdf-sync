@@ -13,6 +13,10 @@
 #define VPDF_SYNC_RDIFF_TH		.125
 #define VPDF_SYNC_N_BEST_MATCHES	4
 
+#ifndef VPDF_SYNC_SSIM_VAGUE
+# define VPDF_SYNC_SSIM_VAGUE		.4
+#endif
+
 #ifndef PLANE_CMP2_EXTRA_FLAGS
 # define PLANE_CMP2_EXTRA_FLAGS		0
 #endif
@@ -85,7 +89,8 @@ struct loc_ctx {
 	char *ren_dump_pat;
 	char *vid_dump_pat;
 	unsigned frame_cmp_nb_planes;
-	unsigned compress : 1;
+	int verbosity;
+	unsigned compress;
 };
 
 static void frame_cmp(
@@ -209,7 +214,15 @@ static void locate(
 ) {
 	for (unsigned i=0; i<n_best; i++)
 		r[i] = (struct res)RES_INIT;
-
+#if 1
+	for (int i=ctx->page_from; i<ctx->page_to; i++) {
+		struct res c;
+		frame_render_cmp(ref_planes, ref_strides, ctx, c.page_idx = i,
+		                 &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx,
+		                 &c.ssim, &c.psnr);
+		res_list_sorted_insert(r, &c, n_best);
+	}
+#else
 	double ssim, psnr;
 	int pg = MAX(ctx->page_from, last_page);
 	int d = pg, u = pg+1;
@@ -225,6 +238,7 @@ static void locate(
 			u++;
 		}
 	}
+#endif
 }
 #endif
 
@@ -240,7 +254,7 @@ static void ppm_export(
 	va_start(ap, path_fmt);
 	int len = vsnprintf(NULL, 0, path_fmt, ap);
 	va_end(ap);
-	char buf[len+3+1];
+	char buf[len+1];
 	va_start(ap, path_fmt);
 	vsnprintf(buf, sizeof(buf), path_fmt, ap);
 	va_end(ap);
@@ -273,11 +287,20 @@ static void ppm_export(
 #undef FCLOSE
 }
 
+struct res_frame {
+	struct res r_last, r[VPDF_SYNC_N_BEST_MATCHES];
+	enum frame_cmp_mode {
+		LOCATED, REUSED, REUSED0,
+	} mode;
+};
+
+#define RES_FRAME_INIT	{ RES_INIT, { RES_INIT,RES_INIT,RES_INIT,RES_INIT, }, }
+
 static struct res decoded_frame(
-	AVFrame *fr[static 2], int frame_idx, const struct loc_ctx *ctx,
+	AVFrame *const fr[static 2], int frame_idx, const struct loc_ctx *ctx,
 	int last_page, double vid_diff_ssim
 ) {
-	struct res r[VPDF_SYNC_N_BEST_MATCHES] = { RES_INIT };
+	struct res r[VPDF_SYNC_N_BEST_MATCHES] = { RES_INIT, };
 	const AVFrame *f0 = fr[frame_idx&1], *f1 = fr[1-(frame_idx&1)];
 	assert(f0->format == ctx->pix_desc.pix_fmt);
 	if (frame_idx) {
@@ -288,8 +311,10 @@ static struct res decoded_frame(
 		if (r->ssim >= vid_diff_ssim)
 			r->page_idx = last_page;
 	}
-	fprintf(stderr, "frame %5d cmp-to-prev: %6.4f %7.3f ",
-	        frame_idx, r->ssim, r->psnr);
+	if (ctx->verbosity > 0) {
+		fprintf(stderr, "frame %5d cmp-to-prev: %6.4f %7.3f ",
+		        frame_idx, r->ssim, r->psnr);
+	}
 
 	enum {
 		LOCATED, REUSED, REUSED0,
@@ -314,22 +339,39 @@ static struct res decoded_frame(
 		                 &((struct loc_ctx *)ctx)->tmp_page_idx,
 		                 &r->ssim, &r->psnr);
 	}
-	fprintf(stderr, "%-7s cmp-to-page:", mode_desc[mode]);
-	for (unsigned i=0; i<(mode == LOCATED ? ARRAY_SIZE(r) : 1); i++)
-		fprintf(stderr, " -> %6.4f %7.3f page %d",
-			r[i].ssim, r[i].psnr, r[i].page_idx+1);
-	if (r->ssim < .4)
-		fprintf(stderr, " vague");
-	fprintf(stderr, "\n");
+	if (ctx->verbosity > 0) {
+		fprintf(stderr, "%-7s cmp-to-page:", mode_desc[mode]);
+		for (unsigned i=0; i<(mode == LOCATED ? ARRAY_SIZE(r) : 1); i++)
+			fprintf(stderr, " -> %6.4f %7.3f page %d",
+			        r[i].ssim, r[i].psnr, r[i].page_idx+1);
+		if (r->ssim < VPDF_SYNC_SSIM_VAGUE)
+			fprintf(stderr, " vague");
+		fprintf(stderr, "\n");
+	}
 	return r[0];
 }
 
 struct res_item {
 	struct res_item *next;
 	int frame_idx[2]; /* interval */
+	int64_t frame_pts[2]; /* interval */
 	double ssim[2]; /* interval */
-	int page;
+	int page_idx;
 };
+
+#define TS_STR_MAX	16
+
+static char * ts_str_fmt(char *r, AVRational tbase, int64_t ts)
+{
+	int neg = ts < 0;
+	int64_t t = av_rescale_q(neg ? -ts : ts, tbase, (AVRational){1, 100});
+	int l = t % 100; t /= 100;
+	int s = t % 60; t /= 60;
+	int m = t % 60; t /= 60;
+	int h = t;
+	snprintf(r, TS_STR_MAX, "%s%02d:%02d:%02d.%02d", neg ? "-" : "", h, m, s, l);
+	return r;
+}
 
 static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, const double *vid_diff_ssims)
 {
@@ -343,21 +385,31 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 	for (int frame_idx = 0; ff_vinput_read_frame(vin, fr[frame_idx&1], frame_idx); frame_idx++) {
 		r = decoded_frame(fr, frame_idx, ctx, r.page_idx,
 		                  r.page_idx < 0 ? 0 : vid_diff_ssims[r.page_idx-ctx->page_from]);
-		if (t && t->page == r.page_idx) {
+		if (t && t->page_idx == r.page_idx) {
+			int64_t ts = fr[frame_idx&1]->pts;
+			if (ts == AV_NOPTS_VALUE)
+				ts = fr[frame_idx&1]->pkt_pts;
 			t->frame_idx[1] = frame_idx;
+			t->frame_pts[1] = ts;
 			t->ssim[0] = MIN(t->ssim[0], r.ssim);
 			t->ssim[1] = MAX(t->ssim[1], r.ssim);
 		} else if (t) {
-			printf("frames %5u to %5u show page %4d w/ ssim %6.4f to %6.4f\n",
-			       t->frame_idx[0], t->frame_idx[1], t->page, t->ssim[0], t->ssim[1]);
+			printf("%s - %s frames %5u to %5u show page %4d w/ ssim %6.4f to %6.4f\n",
+			       ts_str_fmt((char[TS_STR_MAX]){0}, vin->vid_stream->time_base, t->frame_pts[0]),
+			       ts_str_fmt((char[TS_STR_MAX]){0}, vin->vid_stream->time_base, t->frame_pts[1]),
+			       t->frame_idx[0], t->frame_idx[1], t->page_idx+1, t->ssim[0], t->ssim[1]);
 			t = NULL;
 		}
 		if (!t) {
 			*tailp = t = malloc(sizeof(*t));
 			tailp = &t->next;
 			t->next = NULL;
-			t->page = r.page_idx;
+			t->page_idx = r.page_idx;
 			memcpy(t->frame_idx, ((int[2]){ frame_idx, frame_idx }), sizeof(t->frame_idx));
+			int64_t ts = fr[frame_idx&1]->pts;
+			if (ts == AV_NOPTS_VALUE)
+				ts = fr[frame_idx&1]->pkt_pts;
+			memcpy(t->frame_pts, ((int64_t[2]){ ts, ts }), sizeof(t->frame_pts));
 			memcpy(t->ssim, ((double[2]){ r.ssim, r.ssim }), sizeof(t->ssim));
 		}
 	}
@@ -394,13 +446,14 @@ void vpdf_image_prepare(
 	av_image_fill_max_pixsteps(tgt_pixsteps, NULL, a->d);
 
 	struct timeval v;
-	gettimeofday(&v, NULL);
-	fprintf(stderr, "rendered page %4d+%4d/%4d in %5.1f ms",
-	        a->ctx->page_from+1, page_idx-a->ctx->page_from,
-	        a->ctx->page_to - a->ctx->page_from,
-	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
-
-	*a->u = v;
+	if (a->ctx->verbosity > 0) {
+		gettimeofday(&v, NULL);
+		fprintf(stderr, "rendered page %4d+%4d/%4d in %5.1f ms",
+		        a->ctx->page_from+1, page_idx-a->ctx->page_from,
+		        a->ctx->page_to - a->ctx->page_from,
+		        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
+		*a->u = v;
+	}
 
 	struct pimg *rtgt = a->ctx->compress ? &a->ctx->tmp
 	                                     : a->ctx->pbuf+(page_idx-a->ctx->page_from);
@@ -435,10 +488,11 @@ void vpdf_image_prepare(
 		ppm_export(a->ctx->vid_sws, a->ctx->w, a->ctx->h, rtgt,
 		           &a->ctx->vid_ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
 
-
-	gettimeofday(&v, NULL);
-	fprintf(stderr, ", tform %s -> %s in %4.1f ms", a->s->name, a->d->name,
-	        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
+	if (a->ctx->verbosity > 0) {
+		gettimeofday(&v, NULL);
+		fprintf(stderr, ", tform %s -> %s in %4.1f ms", a->s->name, a->d->name,
+		        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
+	}
 
 	if (a->ctx->compress) {
 #ifdef HAVE_LZO
@@ -458,10 +512,12 @@ void vpdf_image_prepare(
 				       a->ctx->tmp.planes[j], &osz, NULL);
 			k += kj[j];
 		}
-		gettimeofday(&v, NULL);
-		fprintf(stderr, ", compressed in %4.0f us: %u -> %*u bytes (%5.1f%%)",
-			(v.tv_sec-a->u->tv_sec)*1e6+(v.tv_usec-a->u->tv_usec),
-			sz, snprintf(NULL, 0, "%u", sz), k, 100.0*k/sz);
+		if (a->ctx->verbosity > 0) {
+			gettimeofday(&v, NULL);
+			fprintf(stderr, ", compressed in %4.0f us: %u -> %*u bytes (%5.1f%%)",
+			        (v.tv_sec-a->u->tv_sec)*1e6+(v.tv_usec-a->u->tv_usec),
+			        sz, snprintf(NULL, 0, "%u", sz), k, 100.0*k/sz);
+		}
 		struct cimg *c = malloc(offsetof(struct cimg,data)+k);
 		for (unsigned j=0; j<tgt_nb_planes; j++)
 			c->lens[j] = kj[j];
@@ -470,8 +526,10 @@ void vpdf_image_prepare(
 #endif
 	}
 
-	fprintf(stderr, "\n");
-	gettimeofday(a->u, NULL);
+	if (a->ctx->verbosity > 0) {
+		fprintf(stderr, "\n");
+		gettimeofday(a->u, NULL);
+	}
 }
 
 static struct SwsContext * tform_sws_context(
@@ -556,6 +614,7 @@ Options [defaults]:\n\
                FROM and TO can both be empty [1:page-num]\n\
   -r REN       use REN to render PDF [%s]\n\
   -u           don't compress pages (watch out for OOM) [%s]\n\
+  -v           increase verbosity\n\
   -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM" PPM_SUFFIX ")\n\
   -y           toggle compare luma plane only [YUV]\n\
 ",
@@ -638,12 +697,13 @@ int main(int argc, char **argv)
 	int page_to   = -1;
 	int compress  = 0;
 	int frame_cmp_luma_only = 0;
+	int verbosity = 0;
 #ifdef HAVE_LZO
 	compress = 1;
 #endif
 	int opt;
 	struct stat st;
-	while ((opt = getopt(argc, argv, ":C:d:D:e:hp:r:uV:y")) != -1)
+	while ((opt = getopt(argc, argv, ":C:d:D:e:hp:r:uvV:y")) != -1)
 		switch (opt) {
 		case 'C':
 			endptr = optarg;
@@ -675,19 +735,29 @@ int main(int argc, char **argv)
 			usage(argv[0]);
 			exit(0);
 		case 'p':
-			page_from = strtol(optarg, &endptr, 10);
+			endptr = optarg;
+			if (*endptr == ':') {
+				page_from = 0;
+			} else {
+				page_from = strtol(endptr, &endptr, 10);
+				if (page_from-- <= 0)
+					DIE(1, "expected positive decimal parameter or nothing for FROM in option '-p'\n");
+			}
 			if (*endptr++ != ':')
 				DIE(1, "option -p requires a colon-separated range\n");
-			if (page_from-- <= 0)
-				DIE(1, "expected positive decimal parameter or nothing for FROM in option '-p'\n");
-			page_to = strtol(endptr, &endptr, 10);
-			if (*endptr || page_to <= 0)
-				DIE(1, "expected positive decimal parameter or nothing for TO in option '-p'\n");
+			if (!*endptr) {
+				page_to = -1;
+			} else {
+				page_to = strtol(endptr, &endptr, 10);
+				if (*endptr || page_to <= 0)
+					DIE(1, "expected positive decimal parameter or nothing for TO in option '-p'\n");
+			}
 			break;
 		case 'r':
 			ren_id = optarg;
 			break;
 		case 'u': compress = 0; break;
+		case 'v': verbosity++; break;
 		case 'V':
 			if (stat(vid_dump_dir = optarg, &st) != 0)
 				DIE(1, "unable to stat() '%s': %s\n", optarg, strerror(errno));
@@ -771,7 +841,7 @@ int main(int argc, char **argv)
 		-1, page_from, page_to, PIX_DESC_INIT,
 		NULL,
 		NULL,
-		0, compress,
+		0, verbosity, compress,
 	};
 	pix_desc_init(&ctx.pix_desc, vin.vid_ctx->pix_fmt);
 	ctx.frame_cmp_nb_planes = frame_cmp_luma_only ? 1 : ctx.pix_desc.nb_planes;
@@ -822,8 +892,9 @@ int main(int argc, char **argv)
 			 * closest matching rendered frame */
 			double rdiff = r[1].ssim;
 			vid_diff_ssims[i-page_from] = 1-(1-rdiff)*(1-rdiff_th);
-			fprintf(stderr, "page %d max ssim %6.4f -> vid_diff_ssim = %6.4f\n",
-			        i+1, rdiff, vid_diff_ssims[i-page_from]);
+			if (ctx.verbosity > 0)
+				fprintf(stderr, "page %d max ssim %6.4f -> vid_diff_ssim = %6.4f\n",
+				        i+1, rdiff, vid_diff_ssims[i-page_from]);
 		}
 		av_freep(diff_tmp.planes);
 	}

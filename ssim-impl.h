@@ -34,6 +34,7 @@ void mu_var_2x8x8_2(const void *in1, const void *in2, uint32_t stride, uint32_t 
 /* mu = 64 * µ => kv = 64^3 * s_{f0,f1} (28 bit = 10.18 fixed-point) */
 void covar_2(const void *in1, const void *in2, uint32_t stride, const uint32_t *mu, int64_t *covar);
 void mse(const void *in1, const void *in2, uint32_t stride, uint32_t *mse);
+unsigned sad_16x16(const void *in1, const void *in2, uint32_t stride);
 #endif
 
 struct cnt2 {

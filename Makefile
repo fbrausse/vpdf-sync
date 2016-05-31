@@ -39,7 +39,7 @@
 #                   are written uncompressed
 #
 #   lzo:            used for fast compression of rendered frames in memory,
-#                   typically reduces memory footprint by 90% with neglible
+#                   typically reduces memory footprint by 90% with a slight
 #                   runtime overhead; enables processing of PDFs with >1k pages
 #                   on commodity hardware
 #                   (can be disabled during run-time)
@@ -55,6 +55,13 @@ OPTS += ghostscript
 OPTS += zlib
 OPTS += lzo
 OPTS += openmp
+
+
+DEFS :=
+# compute PSNR in addition to SSIM
+#DEFS += -DPLANE_CMP2_EXTRA_FLAGS=PLANE_CMP2_PSNR
+# set default global threshold below which results are marked 'vague'
+#DEFS += -DVPDF_SYNC_SSIM_VAGUE=.4
 
 #######################
 # begin compile options
@@ -91,7 +98,7 @@ ifneq ($(findstring poppler-splash,$(OPTS)),)
  PDF_PKGS += poppler-cpp
  override CPPFLAGS += -DHAVE_POPPLER_CPP
  ifneq ($(findstring openmp,$(OPTS)),)
-  poppler-pdf-cpp.o: CXXFLAGS += -fopenmp
+  poppler-pdf-cpp.o: override CXXFLAGS += -fopenmp
  endif
 endif
 
@@ -128,7 +135,7 @@ CXX_OBJS  = $(CXX_SRCS:.cc=.o)
 OBJS     += $(C_OBJS) $(CXX_OBJS) ssim-impl.o
 
 ifneq ($(findstring openmp,$(OPTS)),)
- vpdf-sync.o: CFLAGS += -fopenmp
+ vpdf-sync.o: override CFLAGS += -fopenmp
  vpdf-sync: override LDFLAGS += -fopenmp
 endif
 

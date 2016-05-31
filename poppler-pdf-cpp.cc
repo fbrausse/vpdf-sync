@@ -9,9 +9,9 @@
 #include <cpp/poppler-page-renderer.h>
 
 #if __BYTE_ORDER == __BIG_ENDIAN
-# define PIX_FMT	PIX_FMT_ARGB
+# define PIX_FMT	AV_PIX_FMT_ARGB
 #elif __BYTE_ORDER == __LITTLE_ENDIAN
-# define PIX_FMT	PIX_FMT_BGRA
+# define PIX_FMT	AV_PIX_FMT_BGRA
 #else
 # error __BYTE_ORDER neither big nor litte (undefined?): cannot interpret CAIRO_FORMAT
 #endif
