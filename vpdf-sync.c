@@ -612,6 +612,9 @@ static void usage(const char *progname)
 	printf("usage: %s [-OPTS] [--] VID REN_OPTS...\n", progname);
 	printf("\n");
 	printf("\
+  VID          path to screen-cast video file\n\
+  REN_OPTS...  options to slide renderer, see options '-R' and '-r' for details\n\
+\n\
 Options [defaults]:\n\
   -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]\n\
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]\n\
@@ -623,9 +626,11 @@ Options [defaults]:\n\
                expected decrease of turbulence of VID frames wrt. RDIFF till\n\
                which they're still not regarded as equal [%g]\n\
   -h           display this help message\n\
+  -L           display list of compiles/linked libraries\n\
   -p FROM:TO   interval of pages to render (1-based, inclusive, each),\n\
                FROM and TO can both be empty [1:page-num]\n\
   -r REN       use REN to render PDF [%s]\n\
+  -R           display usage information for all supported renderers\n\
   -u           don't compress pages (watch out for OOM) [%s]\n\
   -v           increase verbosity\n\
   -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM" PPM_SUFFIX ")\n\
@@ -647,14 +652,24 @@ Classification of match certainty:\n\
   'fuzzy' otherwise         (match unclear, try adjusting '-C')\n\
 ",
 	       VPDF_SYNC_SSIM_EXACT, VPDF_SYNC_SSIM_VAGUE);
+	printf("\n\
+Author: Franz Brausse <dev@karlchenofhell.org>, code licensed under GPLv2.\n\
+");
+}
+
+static void rens(void)
+{
 	for (unsigned i=0; i<ARRAY_SIZE(renderers); i++) {
-		printf("\n");
 		char *ren_argv[] = { renderers[i].id, "-h" };
 		optind = 0;
 		renderers[i].r->create(ARRAY_SIZE(ren_argv), ren_argv, 0, 0);
+		printf("\n");
 	}
+}
 
-	fprintf(stderr, "\nLibraries   (compiled,\tlinked):\n");
+static void libs(void)
+{
+	fprintf(stderr, "Libraries   (compiled,\tlinked):\n");
 #ifdef HAVE_ZLIB
 	fprintf(stderr, "  zlib      (%s,\t%s)\n",
 	        ZLIB_VERSION, zlibVersion());
@@ -723,7 +738,7 @@ int main(int argc, char **argv)
 #endif
 	int opt;
 	struct stat st;
-	while ((opt = getopt(argc, argv, ":C:d:D:e:hp:r:uvV:y")) != -1)
+	while ((opt = getopt(argc, argv, ":C:d:D:e:hLp:r:RuvV:y")) != -1)
 		switch (opt) {
 		case 'C':
 			endptr = optarg;
@@ -754,6 +769,9 @@ int main(int argc, char **argv)
 		case 'h':
 			usage(argv[0]);
 			exit(0);
+		case 'L':
+			libs();
+			exit(0);
 		case 'p':
 			endptr = optarg;
 			if (*endptr == ':') {
@@ -776,6 +794,9 @@ int main(int argc, char **argv)
 		case 'r':
 			ren_id = optarg;
 			break;
+		case 'R':
+			rens();
+			exit(0);
 		case 'u': compress = 0; break;
 		case 'v': verbosity++; break;
 		case 'V':
