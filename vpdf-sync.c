@@ -661,7 +661,7 @@ static void rens(void)
 {
 	for (unsigned i=0; i<ARRAY_SIZE(renderers); i++) {
 		char *ren_argv[] = { renderers[i].id, "-h" };
-		optind = 0;
+		optind = 1;
 		renderers[i].r->create(ARRAY_SIZE(ren_argv), ren_argv, 0, 0);
 		printf("\n");
 	}
@@ -844,7 +844,7 @@ int main(int argc, char **argv)
 	argv[optind] = ren_id;
 	argc -= optind;
 	argv += optind;
-	optind = 0;
+	optind = 1;
 
 	av_register_all();
 #ifdef HAVE_LZO

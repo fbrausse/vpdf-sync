@@ -73,7 +73,7 @@ WARN_FLAGS        = -Wall -Wno-unused-function
 CFLAGS            = -O2 $(WARN_FLAGS)
 CXXFLAGS          = $(CFLAGS)
 CPPFLAGS          = -DNDEBUG
-override LDFLAGS  = $(CFLAGS) -Wl,--as-needed
+override LDFLAGS += $(CFLAGS)
 
 ###############################################################################
 # end of options;
@@ -153,9 +153,10 @@ endif
 
 all: vpdf-sync
 
-vpdf-sync: override LDLIBS += $(shell pkg-config --libs $(PKGS) $(PDF_PKGS)) -lm
+vpdf-sync: override LDLIBS  += $(shell pkg-config --libs $(PKGS) $(PDF_PKGS)) -lm
+vpdf-sync: override LDFLAGS += $(shell pkg-config --libs-only-L --libs-only-other $(PKGS) $(PDF_PKGS))
 vpdf-sync: $(OBJS)
-	@echo "  [LD]  $@"
+	@echo "  [LD]   $@"
 	$(Q)$(LINK) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(OBJS): override CFLAGS += $(shell pkg-config --cflags $(PKGS))
@@ -163,15 +164,19 @@ $(OBJS): override CXXFLAGS += $(shell pkg-config --cflags $(PKGS))
 $(OBJS): %.o: $(wildcard *.h *.hh) Makefile
 
 %.o: %.s
-	@echo "  [AS]  $@"
+	@echo "  [AS]   $@"
 	$(Q)$(AS) $(AFLAGS) -o $@ $<
 
+%.o: %.S
+	@echo "  [CCAS] $@"
+	$(Q)$(CC) $(addprefix -Xassembler ,$(AFLAGS)) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+
 %.o: %.c
-	@echo "  [CC]  $@"
+	@echo "  [CC]   $@"
 	$(Q)$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 %.o: %.cc
-	@echo "  [CXX] $@"
+	@echo "  [CXX]  $@"
 	$(Q)$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 $(patsubst %.c,%.o,$(filter %.c,$(PDF_SRCS))): override CFLAGS += $(shell pkg-config --cflags $(PDF_PKGS))

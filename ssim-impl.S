@@ -1,13 +1,18 @@
+#if defined(__APPLE__) && defined(__MACH__)
+# define FUNC(name)	_ ## name
+#else
+# define FUNC(name)	name
+#endif
 
 	.text
 
 	.p2align	5
-	.globl		mse
-#	.type		mse, @function
+	.globl		FUNC(mse)
+#	.type		FUNC(mse), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mse)
 ################################################################################
-mse:
+FUNC(mse):
 	pxor		%xmm15, %xmm15
 
 	movq		(%rdi), %xmm0
@@ -95,12 +100,12 @@ mse:
 
 
 	.p2align 5
-	.globl	covar_1
-#	.type	covar_1, @function
+	.globl	FUNC(covar_1)
+#	.type	FUNC(covar_1), @function
 ################################################################################
 # int32_t(const void *in1, const void *in2, uint32_t stride, uint32_t *mean)
 ################################################################################
-covar_1:
+FUNC(covar_1):
 	lea		(%rdx,%rdx,2), %r8	# 3*stride
 
 	movq		(%rdi       ), %xmm0
@@ -228,12 +233,12 @@ covar_1:
 	ret
 
 	.p2align 5
-	.globl	var_1
-#	.type	var_1, @function
+	.globl	FUNC(var_1)
+#	.type	FUNC(var_1), @function
 ################################################################################
 # int64_t(const void *in1, const void *in2, unsigned stride, uint32_t mu)
 ################################################################################
-var_1:
+FUNC(var_1):
 	pxor		%xmm8, %xmm8
 
 	movd		%rcx, %xmm9		# 2 [ 00 .. 00  µy µx ]
@@ -344,12 +349,12 @@ var_1:
 
 
 	.p2align 5
-	.globl	covar_2
-#	.type	covar_2, @function
+	.globl	FUNC(covar_2)
+#	.type	FUNC(covar_2), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, const unsigned *mu, long long *covar)
 ################################################################################
-covar_2:
+FUNC(covar_2):
 	movd		(%rcx), %xmm9		# 2 [ 00 .. 00  µy µx ]
 	punpcklwd	%xmm9, %xmm9		# 2 [ 00 .. 00  µy µy µx µx ]
 	pshufd		$0x55, %xmm9, %xmm10	# 2 [ µy .. µy ]
@@ -403,7 +408,7 @@ covar_2:
 	lea		(%rdx,%rdx), %r9	# 2*stride
 	add		%r9, %rdx		# 3*stride
 	add		%rdx, %rdi		# line 3
-	
+
 	movq		(%rdi), %xmm0		# line 3
 	movq		(%rdi,%r9), %xmm1	# line 5
 	movq		(%rdi,%rdx), %xmm2	# line 6
@@ -480,12 +485,12 @@ covar_2:
 
 
 	.p2align 5
-	.globl	mu_var_2x8x8_2
-#	.type	mu_var_2x8x8_2, @function
+	.globl	FUNC(mu_var_2x8x8_2)
+#	.type	FUNC(mu_var_2x8x8_2), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mu, long *var)
 ################################################################################
-mu_var_2x8x8_2:
+FUNC(mu_var_2x8x8_2):
 	mov		%rdx, %r9
 
 	pxor		%xmm8, %xmm8
@@ -649,18 +654,18 @@ mu_var_2x8x8_2:
 
 
 	.p2align 5
-	.globl	mu_var_2x8x8_2_covar
-#	.type	mu_var_2x8x8_2_covar, @function
+	.globl	FUNC(mu_var_2x8x8_2_covar)
+#	.type	FUNC(mu_var_2x8x8_2_covar), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mu, long *var, long long *covar)
 ################################################################################
-mu_var_2x8x8_2_covar:
+FUNC(mu_var_2x8x8_2_covar):
 	mov		%rdx, %r9	# TODO: covar!!
 
 	pxor		%xmm8, %xmm8
 
-	# in1 = f0 = a; µx = sum(a??)
-	# in2 = f1 = b; µy = sum(b??)
+	# in1 = f0 = a; µx = sum(a**)
+	# in2 = f1 = b; µy = sum(b**)
 
 	movq		(%rdi), %xmm0
 	movq		(%rdi,%rdx), %xmm1
@@ -680,22 +685,22 @@ mu_var_2x8x8_2_covar:
 	punpcklqdq	%xmm7, %xmm6	# 1 [ a77 .. a70 a67 .. a60 ]
 
 	movdqa		%xmm0, %xmm9
-	psadbw		%xmm8, %xmm9	# 2 [ 00 00 00 sum(a1?)  00 00 00 sum(a0?) ]
+	psadbw		%xmm8, %xmm9	# 2 [ 00 00 00 sum(a1*)  00 00 00 sum(a0*) ]
 	movdqa		%xmm2, %xmm10
-	psadbw		%xmm8, %xmm10	# 2 [ 00 00 00 sum(a3?)  00 00 00 sum(a2?) ]
-	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(a[13]?)  00 00 00 sum(a[02]?) ]
+	psadbw		%xmm8, %xmm10	# 2 [ 00 00 00 sum(a3*)  00 00 00 sum(a2*) ]
+	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(a[13]*)  00 00 00 sum(a[02]*) ]
 
 	movdqa		%xmm4, %xmm11
-	psadbw		%xmm8, %xmm11	# 2 [ 00 00 00 sum(a5?)  00 00 00 sum(a4?) ]
+	psadbw		%xmm8, %xmm11	# 2 [ 00 00 00 sum(a5*)  00 00 00 sum(a4*) ]
 	movdqa		%xmm6, %xmm12
-	psadbw		%xmm8, %xmm12	# 2 [ 00 00 00 sum(a7?)  00 00 00 sum(a6?) ]
-	paddw		%xmm12, %xmm11	# 2 [ 00 00 00 sum(a[57]?)  00 00 00 sum(a[46]?) ]
+	psadbw		%xmm8, %xmm12	# 2 [ 00 00 00 sum(a7*)  00 00 00 sum(a6*) ]
+	paddw		%xmm12, %xmm11	# 2 [ 00 00 00 sum(a[57]*)  00 00 00 sum(a[46]*) ]
 
-	paddw		%xmm11, %xmm9	# 2 [ 00 00 00 sum(a[1357]?)  00 00 00 sum(a[0246]?) ]
+	paddw		%xmm11, %xmm9	# 2 [ 00 00 00 sum(a[1357]*)  00 00 00 sum(a[0246]*) ]
 	pshufd		$0x4e, %xmm9, %xmm11
-	paddw		%xmm11, %xmm9	# 2 [ 00 00 00 sum(a??) 00 00 00 sum(a??) ]
-	packssdw	%xmm9, %xmm9	# 2 [ 00 sum(a??) 00 sum(a??) 00 sum(a??) 00 sum(a??) ]
-	packssdw	%xmm9, %xmm9	# 2 [ sum(a??) .. sum(a??) ]
+	paddw		%xmm11, %xmm9	# 2 [ 00 00 00 sum(a**) 00 00 00 sum(a**) ]
+	packssdw	%xmm9, %xmm9	# 2 [ 00 sum(a**) 00 sum(a**) 00 sum(a**) 00 sum(a**) ]
+	packssdw	%xmm9, %xmm9	# 2 [ sum(a**) .. sum(a**) ]
 
 	# free: 1,3,5,7,8,10,11,12,13,14,15
 	# used: 0,2,4,6,9
@@ -764,9 +769,9 @@ mu_var_2x8x8_2_covar:
 	paddd		%xmm6, %xmm4	# 4 [ sum(a[4-7][67]^2) .. sum(a[4-7][01]^2) ]
 
 	movdqa		%xmm0, %xmm10
-	paddd		%xmm4, %xmm10	# 4 [ sum(a?[67]^2) .. sum(a?[01]^2) ]
+	paddd		%xmm4, %xmm10	# 4 [ sum(a*[67]^2) .. sum(a*[01]^2) ]
 	pshufd		$0x4e, %xmm10, %xmm0
-	paddd		%xmm0, %xmm10	# 4 [ sum(a?[2367]2) sum(a?[0145]^2) sum(a?[2367]2) sum(a?[0145]^2) ]
+	paddd		%xmm0, %xmm10	# 4 [ sum(a*[2367]2) sum(a*[0145]^2) sum(a*[2367]2) sum(a*[0145]^2) ]
 
 	movd		%xmm9, %edi
 	movq		%xmm10, %rax
@@ -788,10 +793,10 @@ mu_var_2x8x8_2_covar:
 	punpcklqdq	%xmm7, %xmm6	# 1 [ b47 .. b40 b27 .. b20 ]
 
 	movdqa		%xmm4, %xmm9
-	psadbw		%xmm8, %xmm9	# 2 [ 00 00 00 sum(b1?)  00 00 00 sum(b0?) ]
+	psadbw		%xmm8, %xmm9	# 2 [ 00 00 00 sum(b1*)  00 00 00 sum(b0*) ]
 	movdqa		%xmm6, %xmm10
-	psadbw		%xmm8, %xmm10	# 2 [ 00 00 00 sum(b4?)  00 00 00 sum(b2?) ]
-	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(b[14]?)  00 00 00 sum(b[02]?) ]
+	psadbw		%xmm8, %xmm10	# 2 [ 00 00 00 sum(b4*)  00 00 00 sum(b2*) ]
+	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(b[14]*)  00 00 00 sum(b[02]*) ]
 
 	# free: 0,5,7,8,10
 
@@ -809,31 +814,31 @@ mu_var_2x8x8_2_covar:
 	# free: 5,8,10
 
 	movdqa		%xmm0, %xmm5
-	psadbw		%xmm8, %xmm5	# 2 [ 00 00 00 sum(b6?)  00 00 00 sum(b3?) ]
+	psadbw		%xmm8, %xmm5	# 2 [ 00 00 00 sum(b6*)  00 00 00 sum(b3*) ]
 	movdqa		%xmm7, %xmm10
-	psadbw		%xmm8, %xmm10	# 2 [ 00 00 00 sum(b7?)  00 00 00 sum(b5?) ]
-	paddw		%xmm5, %xmm10	# 2 [ 00 00 00 sum(b[67]?)  00 00 00 sum(b[35]?) ]
+	psadbw		%xmm8, %xmm10	# 2 [ 00 00 00 sum(b7*)  00 00 00 sum(b5*) ]
+	paddw		%xmm5, %xmm10	# 2 [ 00 00 00 sum(b[67]*)  00 00 00 sum(b[35]*) ]
 
-	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(b[1467]?)  00 00 00 sum(b[0235]?) ]
+	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(b[1467]*)  00 00 00 sum(b[0235]*) ]
 	pshufd		$0x4e, %xmm9, %xmm10
-	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(b??) 00 00 00 sum(b??) ]
-	packssdw	%xmm9, %xmm9	# 2 [ 00 sum(b??) 00 sum(b??) 00 sum(b??) 00 sum(b??) ]
-	packssdw	%xmm9, %xmm9	# 2 [ sum(b??) .. sum(b??) ]
+	paddw		%xmm10, %xmm9	# 2 [ 00 00 00 sum(b**) 00 00 00 sum(b**) ]
+	packssdw	%xmm9, %xmm9	# 2 [ 00 sum(b**) 00 sum(b**) 00 sum(b**) 00 sum(b**) ]
+	packssdw	%xmm9, %xmm9	# 2 [ sum(b**) .. sum(b**) ]
 
 	# free: 5,8,10
 	# 0 : 1 [ b67 .. b60 b37 .. b30 ]
-	# 1 : 2 [ µx-a4? ]
-	# 2 : 2 [ µx-a5? ]
-	# 3 : 2 [ µx-a6? ]
+	# 1 : 2 [ µx-a4* ]
+	# 2 : 2 [ µx-a5* ]
+	# 3 : 2 [ µx-a6* ]
 	# 4 : 1 [ b17 .. b10 b07 .. b00 ]
 	# 6 : 1 [ b47 .. b40 b27 .. b20 ]
 	# 7 : 1 [ b77 .. b70 b57 .. b50 ]
-	# 9 : 2 [ sum(b??) .. sum(b??) ]
-	# 11: 2 [ µx-a7? ]
-	# 12: 2 [ µx-a0? ]
-	# 13: 2 [ µx-a1? ]
-	# 14: 2 [ µx-a2? ]
-	# 15: 2 [ µx-a3? ]
+	# 9 : 2 [ sum(b**) .. sum(b**) ]
+	# 11: 2 [ µx-a7* ]
+	# 12: 2 [ µx-a0* ]
+	# 13: 2 [ µx-a1* ]
+	# 14: 2 [ µx-a2* ]
+	# 15: 2 [ µx-a3* ]
 
 	movdqa		%xmm4, %xmm5
 	punpckhbw	%xmm8, %xmm5
@@ -841,58 +846,58 @@ mu_var_2x8x8_2_covar:
 	punpcklbw	%xmm8, %xmm10
 	psllw		$6, %xmm5
 	psllw		$6, %xmm10
-	psubsw		%xmm9, %xmm5	# 2 [ µy-b1? ]
-	psubsw		%xmm9, %xmm10	# 2 [ µy-b0? ]
-	pmaddwd		%xmm5, %xmm13	# 4 [ cv:1? ]
-	pmaddwd		%xmm10, %xmm12	# 4 [ cv:0? ]
-	paddd		%xmm13, %xmm12	# 4 [ cv:[01]? ]
+	psubsw		%xmm9, %xmm5	# 2 [ µy-b1* ]
+	psubsw		%xmm9, %xmm10	# 2 [ µy-b0* ]
+	pmaddwd		%xmm5, %xmm13	# 4 [ cv:1* ]
+	pmaddwd		%xmm10, %xmm12	# 4 [ cv:0* ]
+	paddd		%xmm13, %xmm12	# 4 [ cv:[01]* ]
 
 	movdqa		%xmm4, %xmm10
 	punpckhbw	%xmm8, %xmm10
 	punpcklbw	%xmm8, %xmm4
-	pmaddwd		%xmm4, %xmm4	# 4 [ b0?^2 ]
-	pmaddwd		%xmm10, %xmm10	# 4 [ b1?^2 ]
-	paddd		%xmm10, %xmm4	# 4 [ b[01]?^2 ]
+	pmaddwd		%xmm4, %xmm4	# 4 [ b0*^2 ]
+	pmaddwd		%xmm10, %xmm10	# 4 [ b1*^2 ]
+	paddd		%xmm10, %xmm4	# 4 [ b[01]*^2 ]
 
 	# free: 5,8,10,13
 
 	movdqa		%xmm6, %xmm5
-	punpcklbw	%xmm8, %xmm5	# 2 [ b2? ]
-	punpckhbw	%xmm8, %xmm6	# 2 [ b4? ]
+	punpcklbw	%xmm8, %xmm5	# 2 [ b2* ]
+	punpckhbw	%xmm8, %xmm6	# 2 [ b4* ]
 	movdqa		%xmm5, %xmm10
 	psllw		$6, %xmm10
 	movdqa		%xmm6, %xmm13
 	psllw		$6, %xmm13
-	psubw		%xmm9, %xmm10	# 2 [ µy-b2? ]
-	psubw		%xmm9, %xmm13	# 2 [ µy-b4? ]
-	pmaddwd		%xmm10, %xmm14	# 4 [ cv:2? ]
-	pmaddwd		%xmm13, %xmm1	# 4 [ cv:4? ]
-	paddd		%xmm14, %xmm1	# 4 [ cv:[24]? ]
+	psubw		%xmm9, %xmm10	# 2 [ µy-b2* ]
+	psubw		%xmm9, %xmm13	# 2 [ µy-b4* ]
+	pmaddwd		%xmm10, %xmm14	# 4 [ cv:2* ]
+	pmaddwd		%xmm13, %xmm1	# 4 [ cv:4* ]
+	paddd		%xmm14, %xmm1	# 4 [ cv:[24]* ]
 	# 18.12s
-	paddd		%xmm12, %xmm1	# 4 [ cv:[0124]? ]
+	paddd		%xmm12, %xmm1	# 4 [ cv:[0124]* ]
 
-	pmaddwd		%xmm5, %xmm5	# 4 [ b2?^2 ]
-	pmaddwd		%xmm6, %xmm6	# 4 [ b4?^2 ]
-	paddd		%xmm6, %xmm5	# 4 [ b[24]?^2 ]
-	paddd		%xmm5, %xmm4	# 4 [ b[0124]?^2 ]
+	pmaddwd		%xmm5, %xmm5	# 4 [ b2*^2 ]
+	pmaddwd		%xmm6, %xmm6	# 4 [ b4*^2 ]
+	paddd		%xmm6, %xmm5	# 4 [ b[24]*^2 ]
+	paddd		%xmm5, %xmm4	# 4 [ b[0124]*^2 ]
 
 	# free: 5,6,8,10,12,13,14
 
 	movdqa		%xmm0, %xmm5
 	movdqa		%xmm7, %xmm10
-	punpcklbw	%xmm8, %xmm0	# 2 [ b3? ]
-	punpckhbw	%xmm8, %xmm5	# 2 [ b6? ]
-	punpcklbw	%xmm8, %xmm7	# 2 [ b5? ]
-	punpckhbw	%xmm8, %xmm10	# 2 [ b7? ]
+	punpcklbw	%xmm8, %xmm0	# 2 [ b3* ]
+	punpckhbw	%xmm8, %xmm5	# 2 [ b6* ]
+	punpcklbw	%xmm8, %xmm7	# 2 [ b5* ]
+	punpckhbw	%xmm8, %xmm10	# 2 [ b7* ]
 	movdqa		%xmm0, %xmm6
 	psllw		$6, %xmm6
 	movdqa		%xmm5, %xmm12
 	psllw		$6, %xmm12
 	psubw		%xmm9, %xmm6
 	psubw		%xmm9, %xmm12
-	pmaddwd		%xmm6, %xmm15	# 4 [ cv:3? ]
-	pmaddwd		%xmm12, %xmm3	# 4 [ cv:6? ]
-	paddd		%xmm15, %xmm3	# 4 [ cv:[36]? ]
+	pmaddwd		%xmm6, %xmm15	# 4 [ cv:3* ]
+	pmaddwd		%xmm12, %xmm3	# 4 [ cv:6* ]
+	paddd		%xmm15, %xmm3	# 4 [ cv:[36]* ]
 
 	movdqa		%xmm7, %xmm6
 	psllw		$6, %xmm6
@@ -900,25 +905,25 @@ mu_var_2x8x8_2_covar:
 	psllw		$6, %xmm12
 	psubw		%xmm9, %xmm6
 	psubw		%xmm9, %xmm12
-	pmaddwd		%xmm6, %xmm2	# 4 [ cv:5? ]
-	pmaddwd		%xmm12, %xmm11	# 4 [ cv:7? ]
-	paddd		%xmm11, %xmm2	# 4 [ cv:[57]? ]
+	pmaddwd		%xmm6, %xmm2	# 4 [ cv:5* ]
+	pmaddwd		%xmm12, %xmm11	# 4 [ cv:7* ]
+	paddd		%xmm11, %xmm2	# 4 [ cv:[57]* ]
 	# 18.12s
-	paddd		%xmm2, %xmm3	# 4 [ cv:[3567]? ]
+	paddd		%xmm2, %xmm3	# 4 [ cv:[3567]* ]
 
-	pmaddwd		%xmm0, %xmm0	# 4 [ b3?^2 ]
-	pmaddwd		%xmm5, %xmm5	# 4 [ b6?^2 ]
-	pmaddwd		%xmm7, %xmm7	# 4 [ b5?^2 ]
-	pmaddwd		%xmm10, %xmm10	# 4 [ b7?^2 ]
-	paddd		%xmm5, %xmm0	# 4 [ b[36]?^2 ]
-	paddd		%xmm10, %xmm7	# 4 [ b[57]?^2 ]
-	paddd		%xmm7, %xmm0	# 4 [ b[3567]?^2 ]
-	paddd		%xmm0, %xmm4	# 4 [ b??^2 ]
+	pmaddwd		%xmm0, %xmm0	# 4 [ b3*^2 ]
+	pmaddwd		%xmm5, %xmm5	# 4 [ b6*^2 ]
+	pmaddwd		%xmm7, %xmm7	# 4 [ b5*^2 ]
+	pmaddwd		%xmm10, %xmm10	# 4 [ b7*^2 ]
+	paddd		%xmm5, %xmm0	# 4 [ b[36]*^2 ]
+	paddd		%xmm10, %xmm7	# 4 [ b[57]*^2 ]
+	paddd		%xmm7, %xmm0	# 4 [ b[3567]*^2 ]
+	paddd		%xmm0, %xmm4	# 4 [ b**^2 ]
 
 
-	# 1: 4 [ cv:[0124]? ]
-	# 3: 4 [ cv:[3567]? ]
-	# 4: 4 [ b??^2 ]
+	# 1: 4 [ cv:[0124]* ]
+	# 3: 4 [ cv:[3567]* ]
+	# 4: 4 [ b**^2 ]
 	# 8: zero
 	# 9: 2 [ µy .. µy ]
 
@@ -991,7 +996,7 @@ mu_var_2x8x8_2_covar:
 ################################################################################
 # unsigned(const void *in1, const void *in2, unsigned stride)
 ################################################################################
-sad_16x16:
+FUNC(sad_16x16):
 	lea		(%rdx,%rdx,2),	%rcx	# 3*stride
 	lea		(%rdi,%rcx),	%r9	# in1+3*stride
 
