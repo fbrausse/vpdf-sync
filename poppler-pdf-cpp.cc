@@ -101,6 +101,57 @@ static void * create(int argc, char **argv, unsigned w, unsigned h)
 	return new poppler_cpp_ren(pdf, w, h, keep_aspect, hints);
 }
 
+#include "unicode-convert.h"
+
+#ifdef HAVE_POPPLER_USTRING_FIXED
+static char * ustringtomb(const ustring &us)
+{
+	auto s = us.to_utf8();
+	if (!env_is_utf8())
+		return utf8tomb(s.data(), s.size());
+	char *t = (char *)malloc(s.size()+1);
+	memcpy(t, s.data(), s.size());
+	t[s.size()] = '\0';
+	return t;
+}
+#elif POPPLER_VERSION_MAJOR == 0 && POPPLER_VERSION_MINOR <= 44
+/* here we know ustring stores UTF16 in native byte order */
+# if defined(HAVE_UCHAR_H) && defined(__STDC_UTF_16__)
+#  include <cuchar>
+static char * ustringtomb(const ustring &us)
+{
+	char *t = (char *)malloc(us.size() * 2 + 1), *t2 = t;
+	mbstate_t ps;
+	memset(&ps, 0, sizeof(ps));
+	for (unsigned i=0; i<us.size(); i++)
+		t2 += c16rtomb(t2, us[i], &ps);
+	t2 += c16rtomb(t2, u'\0', &ps);
+	return t;
+}
+# else
+static char * ustringtomb(const ustring &us)
+{
+	char *t = (char *)malloc(us.size() * 2 + 1), *t2 = t;
+	mbstate_t ps;
+	memset(&ps, 0, sizeof(ps));
+	const uint16_t *src = us.data();
+	size_t len = us.size();
+	uint32_t u32;
+	int l;
+	while ((l = ucs2_to_ucs4(src, len, &u32)) > 0) {
+		src += l;
+		len -= l;
+		t2 += ucs4tomb(t2, u32, &ps);
+	}
+	t2 += ucs4tomb(t2, '\0', &ps);
+	return t;
+}
+# endif
+#else
+# error Poppler page labels unusable, use a version where bugs.freedesktop.org/show_bug.cgi?id=96313 is fixed and #define HAVE_POPPLER_USTRING_FIXED
+#endif
+
+
 static void render(
 	void *const _ren, const int page_from, const int page_to,
 	const struct img_prep_args *const img_prep_args
@@ -126,10 +177,7 @@ static void render(
 		                              MAX(r.width() * wa, 0) / 2,
 		                              MAX(r.height() * ha, 0) / 2);
 
-		auto s = p->label().to_utf8();
-		char *t = (char *)malloc(s.size()+1);
-		memcpy(t, s.data(), s.size());
-		t[s.size()] = '\0';
+		char *label = ustringtomb(p->label());
 
 		delete p;
 		struct vpdf_image img = {
@@ -141,7 +189,7 @@ static void render(
 #ifdef _OPENMP
 # pragma omp critical
 #endif
-		vpdf_image_prepare(&img, img_prep_args, page_idx, t);
+		vpdf_image_prepare(&img, img_prep_args, page_idx, label);
 	}
 }
 

@@ -4,6 +4,7 @@
 #include <unistd.h>	/* getopt(3) */
 #include <sys/time.h>	/* gettimeofday(3) */
 #include <sys/stat.h>	/* stat(3) */
+#include <locale.h>	/* setlocale(3) */
 #include <assert.h>
 
 #include "common.h"
@@ -459,9 +460,9 @@ void vpdf_image_prepare(
 	struct timeval v;
 	if (a->ctx->verbosity > 0) {
 		gettimeofday(&v, NULL);
-		fprintf(stderr, "rendered page %4d+%4d/%4d in %5.1f ms",
+		fprintf(stderr, "rendered page %4d+%4d/%4d (%s) in %5.1f ms",
 		        a->ctx->page_from+1, page_idx-a->ctx->page_from,
-		        a->ctx->page_to - a->ctx->page_from,
+		        a->ctx->page_to - a->ctx->page_from, label,
 		        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
 		*a->u = v;
 	}
@@ -846,6 +847,7 @@ int main(int argc, char **argv)
 	argv += optind;
 	optind = 1;
 
+	setlocale(LC_CTYPE, "");
 	av_register_all();
 #ifdef HAVE_LZO
 	lzo_init();

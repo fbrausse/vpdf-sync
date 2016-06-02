@@ -127,7 +127,7 @@ PKGS += libavformat libavcodec libswscale libavutil
 
 override CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 
-SRCS     += vpdf-sync.c $(PDF_SRCS)
+SRCS     += vpdf-sync.c unicode-convert.c $(PDF_SRCS)
 C_SRCS    = $(filter %.c,$(SRCS))
 CXX_SRCS  = $(filter %.cc,$(SRCS))
 C_OBJS    = $(C_SRCS:.c=.o)

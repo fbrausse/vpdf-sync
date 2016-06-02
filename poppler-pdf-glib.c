@@ -58,9 +58,14 @@ static void render(void *_ren, int page_from, int page_to, const struct img_prep
 		cairo_restore(ren->cr);
 		cairo_surface_flush(ren->sf);
 
+		char *label = poppler_page_get_label(page);
+		if (!g_get_charset(NULL)) {
+			char *tmp = g_locale_from_utf8(label, strlen(label), NULL, NULL, NULL);
+			free(label);
+			label = tmp;
+		}
+		vpdf_image_prepare(&img, img_prep_args, page_idx, label);
 		g_object_unref(page);
-
-		vpdf_image_prepare(&img, img_prep_args, page_idx, poppler_page_get_label(page));
 	}
 }
 
