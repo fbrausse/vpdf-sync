@@ -21,13 +21,13 @@ int utf8_to_ucs4(const char *utf8, size_t ulen, uint32_t *r)
 	} else if (ulen > 2 && (c & 0xf0) == 0xe0) {
 		d = (uint8_t)*utf8++;
 		e = (uint8_t)*utf8++;
-		*r = (c & ~0xe0) << 12 | (d & 0x3f) << 6 | (e & 0x3f);
+		*r = (c & ~0xf0) << 12 | (d & 0x3f) << 6 | (e & 0x3f);
 		ret = 3;
 	} else if (ulen > 3 && (c & 0xf8) == 0xf0) {
 		d = (uint8_t)*utf8++;
 		e = (uint8_t)*utf8++;
 		f = (uint8_t)*utf8++;
-		*r = (c & ~0xe0) << 18 | (d & 0x3f) << 12 | (e & 0x3f) << 6 | (f & 0x3f);
+		*r = (c & ~0xf8) << 18 | (d & 0x3f) << 12 | (e & 0x3f) << 6 | (f & 0x3f);
 		ret = 4;
 	} else
 		return -1;
@@ -43,7 +43,7 @@ int ucs2_to_ucs4(const uint16_t *u, size_t ulen, uint32_t *r)
 		*r = a;
 		return 1;
 	} else if (ulen > 1) {
-		*r = ((uint32_t)(a & 0x3fff) << 10 | (*u++ & 0x3ff)) + 0x10000;
+		*r = ((uint32_t)(a & 0x3ff) << 10 | (*u++ & 0x3ff)) + 0x10000;
 		return 2;
 	} else
 		return -1;

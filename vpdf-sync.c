@@ -107,23 +107,24 @@ enum { OUT_HUMAN, OUT_JSON, };
 
 static struct output {
 	char * (*ts_fmt)(char *, AVRational, int64_t);
+	const char *delim;
 	const char *fmt;
 } const outputs[] = {
 	[OUT_HUMAN] = {
-		ts_fmt_hmsc,
+		ts_fmt_hmsc, "",
 "%1$s - %2$s frames %3$5u to %4$5u show page %5$4d (%6$s) w/ ssim %7$6.4f to %8$6.4f %9$s\n",
 	},
 	[OUT_JSON] = {
-		ts_fmt_sec1,
+		ts_fmt_sec1, ",",
 "{\n\
 \t\"pos\": {\n\
 \t\t\"from\": { \"ts_sec\": %1$s, \"idx\": %3$5u },\n\
-\t\t\"to\"  : { \"ts_sec\": %2$s, \"idx\": %4$5u },\n\
+\t\t\"to\"  : { \"ts_sec\": %2$s, \"idx\": %4$5u }\n\
 \t},\n\
 \t\"page\": { \"num\": %5$4d, \"label\": \"%6$s\" },\n\
 \t\"ssim\": { \"from\": %7$6.4f, \"to\": %8$6.4f },\n\
-\t\"classification\": \"%9$s\",\n\
-},\n", },
+\t\"classification\": \"%9$s\"\n\
+}\n", },
 };
 
 struct loc_ctx {
@@ -223,8 +224,6 @@ static struct res * res_list_sorted_insert(struct res *r, const struct res *c, u
 }
 
 #ifdef _OPENMP
-#include <omp.h>
-
 static void locate(
 	const uint8_t *const ref_planes[static 4], const int ref_strides[static 4],
 	const struct loc_ctx *const ctx,
@@ -265,7 +264,7 @@ static void locate(
 ) {
 	for (unsigned i=0; i<n_best; i++)
 		r[i] = (struct res)RES_INIT;
-#if 1
+
 	for (int i=ctx->page_from; i<ctx->page_to; i++) {
 		struct res c;
 		frame_render_cmp(ref_planes, ref_strides, ctx, c.page_idx = i,
@@ -273,23 +272,6 @@ static void locate(
 		                 &c.ssim, &c.psnr);
 		res_list_sorted_insert(r, &c, n_best);
 	}
-#else
-	double ssim, psnr;
-	int pg = MAX(ctx->page_from, last_page);
-	int d = pg, u = pg+1;
-	while (d >= ctx->page_from || u < ctx->page_to) {
-		if (d >= ctx->page_from) {
-			frame_render_cmp(ref_planes, ref_strides, ctx, d, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
-			res_list_sorted_insert(r, &(struct res){ d, ssim, psnr }, n_best);
-			d--;
-		}
-		if (u < ctx->page_to) {
-			frame_render_cmp(ref_planes, ref_strides, ctx, u, &ctx->tmp, &((struct loc_ctx *)ctx)->tmp_page_idx, &ssim, &psnr);
-			res_list_sorted_insert(r, &(struct res){ u, ssim, psnr }, n_best);
-			u++;
-		}
-	}
-#endif
 }
 #endif
 
@@ -435,6 +417,8 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 			char *c = t->ssim[0] < VPDF_SYNC_SSIM_VAGUE ? "vague"
 			        : t->ssim[1] < VPDF_SYNC_SSIM_EXACT ? "fuzzy"
 			        :                                     "exact";
+			if (t != head)
+				printf("%s", ctx->out->delim);
 			printf(ctx->out->fmt,
 			       ctx->out->ts_fmt((char[TS_FMT_MAX]){0},
 			                        vin->vid_ctx->time_base,
