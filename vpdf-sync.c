@@ -82,6 +82,50 @@ static void pix_desc_init(struct pix_desc *desc, enum AVPixelFormat pix_fmt)
 	desc->nb_planes = pix_fmt_nb_planes(desc->d);
 }
 
+#define TS_FMT_MAX	16
+
+static char * ts_fmt_hmsc(char *r, AVRational tbase, int64_t ts)
+{
+	int neg = ts < 0;
+	int64_t t = av_rescale_q(neg ? -ts : ts, tbase, (AVRational){1, 100});
+	int l = t % 100; t /= 100;
+	int s = t % 60; t /= 60;
+	int m = t % 60; t /= 60;
+	int h = t;
+	snprintf(r, TS_FMT_MAX, "%s%02d:%02d:%02d.%02d", neg ? "-" : "", h, m, s, l);
+	return r;
+}
+
+static char * ts_fmt_sec1(char *r, AVRational tbase, int64_t ts)
+{
+	double d = ts * (double)tbase.num/tbase.den;
+	snprintf(r, TS_FMT_MAX, "%.1f", d);
+	return r;
+}
+
+enum { OUT_HUMAN, OUT_JSON, };
+
+static struct output {
+	char * (*ts_fmt)(char *, AVRational, int64_t);
+	const char *fmt;
+} const outputs[] = {
+	[OUT_HUMAN] = {
+		ts_fmt_hmsc,
+"%1$s - %2$s frames %3$5u to %4$5u show page %5$4d (%6$s) w/ ssim %7$6.4f to %8$6.4f %9$s\n",
+	},
+	[OUT_JSON] = {
+		ts_fmt_sec1,
+"{\n\
+\t\"pos\": {\n\
+\t\t\"from\": { \"ts_sec\": %1$s, \"idx\": %3$5u },\n\
+\t\t\"to\"  : { \"ts_sec\": %2$s, \"idx\": %4$5u },\n\
+\t},\n\
+\t\"page\": { \"num\": %5$4d, \"label\": \"%6$s\" },\n\
+\t\"ssim\": { \"from\": %7$6.4f, \"to\": %8$6.4f },\n\
+\t\"classification\": \"%9$s\",\n\
+},\n", },
+};
+
 struct loc_ctx {
 	int w, h;
 	char **labels;
@@ -94,6 +138,7 @@ struct loc_ctx {
 	struct pix_desc pix_desc;
 	char *ren_dump_pat;
 	char *vid_dump_pat;
+	const struct output *out;
 	unsigned frame_cmp_nb_planes;
 	int verbosity;
 	unsigned compress;
@@ -365,22 +410,6 @@ struct res_item {
 	int page_idx;
 };
 
-#define TS_STR_MAX	16
-
-static char * ts_str_fmt(char *r, AVRational tbase, int64_t ts)
-{
-	int neg = ts < 0;
-	int64_t t = av_rescale_q(neg ? -ts : ts, tbase, (AVRational){1, 100});
-	int l = t % 100; t /= 100;
-	int s = t % 60; t /= 60;
-	int m = t % 60; t /= 60;
-	int h = t;
-	snprintf(r, TS_STR_MAX, "%s%02d:%02d:%02d.%02d", neg ? "-" : "", h, m, s, l);
-	return r;
-}
-
-#define TS_STR_FMT(tbase,ts)	ts_str_fmt((char[TS_STR_MAX]){0},tbase,ts)
-
 static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, const double *vid_diff_ssims)
 {
 	struct res_item *head = NULL, *t = NULL, **tailp = &head;
@@ -403,14 +432,19 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 			t->ssim[1] = MAX(t->ssim[1], r.ssim);
 		} else if (t) {
 			char *label = ctx->labels[t->page_idx - ctx->page_from];
-			printf("%s - %s frames %5u to %5u show page %4d (%s) w/ ssim %6.4f to %6.4f %s\n",
-			       TS_STR_FMT(vin->vid_stream->time_base, t->frame_pts[0]),
-			       TS_STR_FMT(vin->vid_stream->time_base, t->frame_pts[1]),
-			       t->frame_idx[0], t->frame_idx[1], t->page_idx+1,
-			       label ? label : "", t->ssim[0], t->ssim[1],
-			       t->ssim[0] < VPDF_SYNC_SSIM_VAGUE ? "vague" :
-			       t->ssim[1] < VPDF_SYNC_SSIM_EXACT ? "fuzzy" :
-			                                           "exact");
+			char *c = t->ssim[0] < VPDF_SYNC_SSIM_VAGUE ? "vague"
+			        : t->ssim[1] < VPDF_SYNC_SSIM_EXACT ? "fuzzy"
+			        :                                     "exact";
+			printf(ctx->out->fmt,
+			       ctx->out->ts_fmt((char[TS_FMT_MAX]){0},
+			                        vin->vid_ctx->time_base,
+			                        t->frame_pts[0]),
+			       ctx->out->ts_fmt((char[TS_FMT_MAX]){0},
+			                        vin->vid_ctx->time_base,
+			                        t->frame_pts[1]),
+			       t->frame_idx[0], t->frame_idx[1],
+			       t->page_idx+1, label ? label : "",
+			       t->ssim[0], t->ssim[1], c);
 			t = NULL;
 		}
 		if (!t) {
@@ -625,10 +659,11 @@ Options [defaults]:\n\
   -D DIR       dump rendered images into DIR (named PAGE-REN" PPM_SUFFIX ")\n\
   -e RDIFF_TH  interpret consecutive frames as equal if SSIM >= RDIFF + TH where\n\
                RDIFF is computed as max SSIM from this to another rendered\n\
-               frame and TH = (1-RDIFF)*RDIFF_TH, i.e. RDIFF_TH is the min.\n\
+               frame and TH = (1-RDIFF)*RDIFF_TH, i.e. RDIFF_TH is the max.\n\
                expected decrease of turbulence of VID frames wrt. RDIFF till\n\
                which they're still not regarded as equal [%g]\n\
   -h           display this help message\n\
+  -j           format output as JSON records [human readable single line]\n\
   -L           display list of compiles/linked libraries\n\
   -p FROM:TO   interval of pages to render (1-based, inclusive, each),\n\
                FROM and TO can both be empty [1:page-num]\n\
@@ -734,6 +769,7 @@ int main(int argc, char **argv)
 	char *ren_dump_dir = NULL;
 	char *vid_dump_dir = NULL;
 	int crop[4] = {0,0,0,0};
+	const struct output *out = &outputs[OUT_HUMAN];
 
 	int page_from = 0;
 	int page_to   = -1;
@@ -745,7 +781,7 @@ int main(int argc, char **argv)
 #endif
 	int opt;
 	struct stat st;
-	while ((opt = getopt(argc, argv, ":C:d:D:e:hLp:r:RuvV:y")) != -1)
+	while ((opt = getopt(argc, argv, ":C:d:D:e:hjLp:r:RuvV:y")) != -1)
 		switch (opt) {
 		case 'C':
 			endptr = optarg;
@@ -776,6 +812,9 @@ int main(int argc, char **argv)
 		case 'h':
 			usage(argv[0]);
 			exit(0);
+		case 'j':
+			out = &outputs[OUT_JSON];
+			break;
 		case 'L':
 			libs();
 			exit(0);
@@ -892,6 +931,7 @@ int main(int argc, char **argv)
 		-1, page_from, page_to, PIX_DESC_INIT,
 		NULL,
 		NULL,
+		out,
 		0, verbosity, compress,
 	};
 	pix_desc_init(&ctx.pix_desc, vin.vid_ctx->pix_fmt);

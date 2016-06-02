@@ -79,6 +79,9 @@ MiB or 1.2 GiB respectively for uncompressed memory storage).
 ```
 usage: ./vpdf-sync [-OPTS] [--] VID REN_OPTS...
 
+  VID          path to screen-cast video file
+  REN_OPTS...  options to slide renderer, see options '-R' and '-r' for details
+
 Options [defaults]:
   -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]
@@ -90,9 +93,12 @@ Options [defaults]:
                expected decrease of turbulence of VID frames wrt. RDIFF till
                which they're still not regarded as equal [0.125]
   -h           display this help message
+  -j           format output as JSON records [human readable single line]
+  -L           display list of compiles/linked libraries
   -p FROM:TO   interval of pages to render (1-based, inclusive, each),
                FROM and TO can both be empty [1:page-num]
   -r REN       use REN to render PDF [poppler-cairo]
+  -R           display usage information for all supported renderers
   -u           don't compress pages (watch out for OOM) [compress]
   -v           increase verbosity
   -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM.ppm.gz)
@@ -103,6 +109,10 @@ Classification of match certainty:
   'vague' when SSIM <  0.4  (most probably no match found in page range),
   'fuzzy' otherwise         (match unclear, try adjusting '-C')
 
+Author: Franz Brausse <dev@karlchenofhell.org>, code licensed under GPLv2.
+```
+
+```
 Renderer 'poppler-cairo' [can render: yes] usage: [-k PASSWD] [--] PDF-PATH
   -k PASSWD    use PASSWD to open protected PDF [(unset)]
 
@@ -114,4 +124,15 @@ Renderer 'poppler-splash' [can render: yes] usage: [-k PASSWD] [-astT] [--] PDF-
   -T           disable text hinting
 
 Renderer 'ghostscript' [can render: yes] usage: [--] PDF-PATH
+```
+
+```
+Libraries   (compiled,	linked):
+  zlib      (1.2.8,	1.2.8)
+  LZO       (2.08,	2.08)
+  OpenMP    (201307)
+  avformat  (56.40.101,	56.40.101)
+  avcodec   (56.60.100,	56.60.100)
+  avutil    (54.31.100,	54.31.100)
+  swscale   (3.1.101,	3.1.101)
 ```
