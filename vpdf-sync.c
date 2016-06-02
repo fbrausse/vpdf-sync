@@ -379,6 +379,8 @@ static char * ts_str_fmt(char *r, AVRational tbase, int64_t ts)
 	return r;
 }
 
+#define TS_STR_FMT(tbase,ts)	ts_str_fmt((char[TS_STR_MAX]){0},tbase,ts)
+
 static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx, const double *vid_diff_ssims)
 {
 	struct res_item *head = NULL, *t = NULL, **tailp = &head;
@@ -402,8 +404,8 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 		} else if (t) {
 			char *label = ctx->labels[t->page_idx - ctx->page_from];
 			printf("%s - %s frames %5u to %5u show page %4d (%s) w/ ssim %6.4f to %6.4f %s\n",
-			       ts_str_fmt((char[TS_STR_MAX]){0}, vin->vid_stream->time_base, t->frame_pts[0]),
-			       ts_str_fmt((char[TS_STR_MAX]){0}, vin->vid_stream->time_base, t->frame_pts[1]),
+			       TS_STR_FMT(vin->vid_stream->time_base, t->frame_pts[0]),
+			       TS_STR_FMT(vin->vid_stream->time_base, t->frame_pts[1]),
 			       t->frame_idx[0], t->frame_idx[1], t->page_idx+1,
 			       label ? label : "", t->ssim[0], t->ssim[1],
 			       t->ssim[0] < VPDF_SYNC_SSIM_VAGUE ? "vague" :
@@ -686,6 +688,10 @@ static void libs(void)
 	v = avformat_version();
 	fprintf(stderr, "  avformat  (%s,\t%d.%d.%d)\n",
 	        AV_STRINGIFY(LIBAVFORMAT_VERSION),
+	        v >> 16, (v >> 8) & 0xff, v & 0xff);
+	v = avcodec_version();
+	fprintf(stderr, "  avcodec   (%s,\t%d.%d.%d)\n",
+	        AV_STRINGIFY(LIBAVCODEC_VERSION),
 	        v >> 16, (v >> 8) & 0xff, v & 0xff);
 	v = avutil_version();
 	fprintf(stderr, "  avutil    (%s,\t%d.%d.%d)\n",

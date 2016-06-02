@@ -3,6 +3,7 @@
 #include "ff-input.h"
 
 #define FF_VINPUT_API_LAVF_AVCTX	(LIBAVFORMAT_VERSION_MAJOR < 57)
+#define FF_VINPUT_API_COUPLED_DATAFLOW	(LIBAVCODEC_VERSION_MAJOR < 57)
 
 char * fferror(int errnum)
 {
@@ -55,6 +56,44 @@ void ff_vinput_open(struct ff_vinput *ff, const char *vid_path)
 	av_init_packet(&ff->pkt);
 }
 
+#if FF_VINPUT_API_COUPLED_DATAFLOW
+static int decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket *pkt)
+{
+	if (avctx->codec_type == AVMEDIA_TYPE_VIDEO)
+		return avcodec_decode_video2(avctx, frame, got_frame, pkt);
+	if (avctx->codec_type == AVMEDIA_TYPE_AUDIO)
+		return avcodec_decode_audio4(avctx, frame, got_frame, pkt);
+	return AVERROR(ENOSYS);
+}
+#else
+/* from https://lists.libav.org/pipermail/libav-devel/2016-March/075361.html
+ *      avconv.c */
+static int decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket *pkt)
+{
+	int ret;
+	int consumed = 0;
+
+	*got_frame = 0;
+
+	// This relies on the fact that the decoder will not buffer additional
+	// packets internally, but returns AVERROR(EAGAIN) if there are still
+	// decoded frames to be returned.
+	ret = avcodec_send_packet(avctx, pkt);
+	if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+		return ret;
+	if (ret >= 0)
+		consumed = pkt->size;
+
+	ret = avcodec_receive_frame(avctx, frame);
+	if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+		return ret;
+	if (ret >= 0)
+		*got_frame = 1;
+
+	return consumed;
+}
+#endif
+
 int ff_vinput_read_frame(struct ff_vinput *ff, AVFrame *fr, int frame_idx)
 {
 	while (!ff->end_of_stream || ff->got_frame) {
@@ -68,7 +107,7 @@ int ff_vinput_read_frame(struct ff_vinput *ff, AVFrame *fr, int frame_idx)
 			ff->got_frame = 0;
 			if (ff->pkt.pts == AV_NOPTS_VALUE)
 				ff->pkt.pts = ff->pkt.dts = frame_idx;
-			int r = avcodec_decode_video2(ff->vid_ctx, fr, &ff->got_frame, &ff->pkt);
+			int r = decode(ff->vid_ctx, fr, &ff->got_frame, &ff->pkt);
 			if (r < 0) {
 				fprintf(stderr, "error decoding VID frame %d: %s\n",
 				        frame_idx, fferror(r));
