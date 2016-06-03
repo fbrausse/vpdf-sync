@@ -117,7 +117,7 @@ static char * ustringtomb(const ustring &us)
 #elif POPPLER_VERSION_MAJOR == 0 && POPPLER_VERSION_MINOR <= 44
 /* here we know ustring stores UTF16 in native byte order */
 # if defined(HAVE_UCHAR_H) && defined(__STDC_UTF_16__)
-#  include <cuchar>
+#  include <uchar.h> /* <cuchar> still unknown to compilers... */
 static char * ustringtomb(const ustring &us)
 {
 	char *t = (char *)malloc(us.size() * 2 + 1), *t2 = t;
