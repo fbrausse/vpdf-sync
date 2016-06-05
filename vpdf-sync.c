@@ -421,10 +421,10 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 				printf("%s", ctx->out->delim);
 			printf(ctx->out->fmt,
 			       ctx->out->ts_fmt((char[TS_FMT_MAX]){0},
-			                        vin->vid_ctx->time_base,
+			                        vin->vid_stream->time_base,
 			                        t->frame_pts[0]),
 			       ctx->out->ts_fmt((char[TS_FMT_MAX]){0},
-			                        vin->vid_ctx->time_base,
+			                        vin->vid_stream->time_base,
 			                        t->frame_pts[1]),
 			       t->frame_idx[0], t->frame_idx[1],
 			       t->page_idx+1, label ? label : "",
@@ -499,6 +499,7 @@ void vpdf_image_prepare(
 
 	sws_scale(a->sws, &data, &s, 0, img->h, tgt.planes, tgt.strides);
 
+	/* TODO: do this for VID frames, too */
 	for (unsigned i=0; i<tgt_nb_planes; i++) {
 		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
 		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
