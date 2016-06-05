@@ -34,6 +34,9 @@ C_NAMESPACE_BEGIN
 
 #ifdef HAVE_LZO
 # include <lzo/lzo1x.h>
+# define COMPRESS_INIT	1
+#else
+# define COMPRESS_INIT	0
 #endif
 
 #ifdef HAVE_ZLIB
@@ -128,22 +131,27 @@ static struct output {
 };
 
 struct loc_ctx {
-	int w, h;
-	char **labels;
-	struct cimg **buf;
-	struct pimg *pbuf;
-	struct pimg tmp, vid_ppm;
-	struct SwsContext *vid_sws;
-	int tmp_page_idx;
-	int page_from, page_to;
-	struct pix_desc pix_desc;
-	char *ren_dump_pat;
-	char *vid_dump_pat;
-	const struct output *out;
-	unsigned frame_cmp_nb_planes;
-	int verbosity;
-	unsigned compress;
+	int w, h;                       /* stage 1: vid open */
+	char **labels;                  /* stage 2: pdf render */
+	struct cimg **buf;              /* stage 2 */
+	struct pimg *pbuf;              /* stage 2 */
+	struct pimg tmp, vid_ppm;       /* stage 2, 3 */
+	struct SwsContext *vid_sws;     /* stage 3 */
+	int tmp_page_idx;               /* stage 2, 3 */
+	int page_from, page_to;         /* stage 0, 2 */
+	struct pix_desc pix_desc;       /* stage 1 */
+	char *ren_dump_pat;             /* stage 0: arg parse, 2 */
+	char *vid_dump_pat;             /* stage 0, 3 */
+	const struct output *out;       /* stage 0, 3 */
+	unsigned frame_cmp_nb_planes;   /* stage 1 */
+	int verbosity;                  /* stage 0 */
+	unsigned compress;              /* stage 0 */
 };
+
+#define LOC_CTX_INIT { \
+	-1, -1, NULL, NULL, NULL, PIMG_INIT, PIMG_INIT, NULL, -1, 0, -1, \
+	PIX_DESC_INIT, NULL, NULL, NULL, 0, 0, COMPRESS_INIT \
+}
 
 static void frame_cmp(
 	const uint8_t *const ref_planes[static 4], const int ref_strides[static 4],
@@ -183,17 +191,17 @@ static const struct pimg * frame_render(
 	const struct loc_ctx *ctx, int page_idx,
 	const struct pimg *tmp_img, int *tmp_page_idx
 ) {
-	if (!ctx->compress) {
-		tmp_img = &ctx->pbuf[page_idx - ctx->page_from];
-	}
+	if (ctx->compress) {
 #ifdef HAVE_LZO
-	else if (*tmp_page_idx != page_idx) {
+		if (*tmp_page_idx == page_idx)
+			return tmp_img;
 		cimg_uncompress(ctx->buf[page_idx - ctx->page_from], tmp_img,
 		                &ctx->pix_desc);
 		*tmp_page_idx = page_idx;
-	}
+		return tmp_img;
 #endif
-	return tmp_img;
+	}
+	return &ctx->pbuf[page_idx - ctx->page_from];
 }
 
 static void frame_render_cmp(
@@ -507,7 +515,7 @@ void vpdf_image_prepare(
 		for (unsigned j=0; j < -(-a->ctx->h >> hsh); j++, p += rtgt->strides[i]) {
 			if (j < a->crop[0] || j >= ((a->ctx->h-a->crop[1]) >> hsh)) {
 				memset(p, black[a->is_yuv][i], rtgt->strides[i]);
-			} else {
+			} else if (a->crop[2] > 0 || a->crop[3] > 0) {
 				int l = -(           -a->crop[2]  >> wsh) * tgt_pixsteps[i];
 				int r = ((a->ctx->w - a->crop[3]) >> wsh) * tgt_pixsteps[i];
 				memset(p    , black[a->is_yuv][i], l);
@@ -607,14 +615,134 @@ static void render(
 	sws_freeContext(a.sws);
 }
 
+struct renderer {
+	char *id;
+	struct vpdf_ren *r;
+};
+
+#ifndef _GNU_SOURCE
+static int asprintf(char **ptr, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int len = vsnprintf(NULL, 0, fmt, ap);
+	va_end(ap);
+	if (len < 0) {
+		perror("vsnprintf");
+		return len;
+	}
+	char *buf = malloc(len+1);
+	if (!buf)
+		return -1;
+	va_start(ap, fmt);
+	len = vsnprintf(buf, len+1, fmt, ap);
+	va_end(ap);
+	*ptr = len < 0 ? free(buf), NULL : buf;
+	return len;
+}
+#endif
+
+#define VPDF_SYNC_REN_DUMP_PAT_PAT	"%s/%%04d-%s" PPM_SUFFIX
+#define VPDF_SYNC_VID_DUMP_PAT_PAT	"%s/%%04d-%%05d-%%6.4f" PPM_SUFFIX
+
+/* ctx needs valid values for: .w, .h, .verbosity, .compress
+ *           reused are      : .page_{from,to}
+ */
+static void loc_ctx_init(
+	struct loc_ctx *ctx, const struct renderer *rr, struct ff_vinput *vin,
+	const int crop[static 4], int frame_cmp_luma_only,
+	const char *ren_dump_dir, const char *vid_dump_dir,
+	int argc, char **argv
+) {
+	int r;
+	if (crop[0]+crop[1] >= ctx->h || crop[2]+crop[3] >= ctx->w)
+		DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
+		       "for %ux%u images\n",
+		    crop[0], crop[1], crop[2], crop[3], ctx->w, ctx->h);
+
+	struct vpdf_ren *ren = rr->r;
+	void *ren_inst = ren->create(argc, argv, ctx->w - crop[2] - crop[3],
+	                                         ctx->h - crop[0] - crop[1]);
+	if (!ren_inst)
+		DIE(1, "error creating renderer '%s': check its params\n", rr->id);
+	unsigned n_pages = ren->n_pages(ren_inst);
+
+	if (ctx->page_to < 0 || ctx->page_to > n_pages)
+		ctx->page_to = n_pages;
+	if (ctx->page_from > ctx->page_to)
+		DIE(1, "error: range [%d,%d] of pages to render is empty\n",
+		    ctx->page_from+1, ctx->page_to);
+	n_pages = ctx->page_to - ctx->page_from;
+
+	ctx->labels    = calloc(n_pages, sizeof(char *));
+	pix_desc_init(&ctx->pix_desc, vin->vid_ctx->pix_fmt);
+	if (ren_dump_dir)
+		asprintf(&ctx->ren_dump_pat, VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, rr->id);
+	if (vid_dump_dir)
+		asprintf(&ctx->vid_dump_pat, VPDF_SYNC_VID_DUMP_PAT_PAT, vid_dump_dir);
+	ctx->frame_cmp_nb_planes = frame_cmp_luma_only ? 1 : ctx->pix_desc.nb_planes;
+
+	if ((r = av_image_alloc(ctx->tmp.planes, ctx->tmp.strides,
+	                        ctx->w, ctx->h, ctx->pix_desc.pix_fmt, 1)) < 0)
+		DIE(1, "error allocating raw video buffer: %s", fferror(r));
+
+	if (ctx->vid_dump_pat || ctx->ren_dump_pat) {
+		ctx->vid_sws = tform_sws_context(ctx->w, ctx->h, ctx->pix_desc.pix_fmt, AV_PIX_FMT_RGB24);
+		int r;
+		if ((r = av_image_alloc(ctx->vid_ppm.planes, ctx->vid_ppm.strides,
+		                        ctx->w, ctx->h, AV_PIX_FMT_RGB24, 1)) < 0)
+			DIE(1, "error allocating raw video buffer: %s", fferror(r));
+	}
+
+	if (ctx->compress) {
+		ctx->buf = malloc(sizeof(struct cimg *) * n_pages);
+	} else {
+		ctx->pbuf = calloc(n_pages, sizeof(*ctx->pbuf));
+		for (int i=0; i<n_pages; i++)
+			if ((r = av_image_alloc(ctx->pbuf[i].planes,
+			                        ctx->pbuf[i].strides,
+			                        ctx->w, ctx->h,
+			                        ctx->pix_desc.pix_fmt, 1)) < 0)
+				DIE(1, "error allocating raw video buffer: %s\n", fferror(r));
+	}
+
+	render(ctx, ren, ren_inst, crop);
+	ren->destroy(ren_inst);
+}
+
+static void loc_ctx_fini(struct loc_ctx *ctx)
+{
+	unsigned n_pages = ctx->page_to-ctx->page_from;
+
+	if (ctx->pbuf) {
+		for (int i=0; i<n_pages; i++)
+			av_freep(ctx->pbuf[i].planes);
+		free(ctx->pbuf);
+	} else {
+		for (unsigned i=0; i<n_pages; i++)
+			free(ctx->buf[i]);
+		free(ctx->buf);
+	}
+
+	for (int i=0; i<n_pages; i++)
+		free(ctx->labels[i]);
+	free(ctx->labels);
+
+	if (ctx->vid_sws) {
+		sws_freeContext(ctx->vid_sws);
+		av_freep(ctx->vid_ppm.planes);
+	}
+
+	av_freep(ctx->tmp.planes);
+	free(ctx->ren_dump_pat);
+	free(ctx->vid_dump_pat);
+}
+
 extern struct vpdf_ren vpdf_ren_poppler_glib;
 extern struct vpdf_ren vpdf_ren_poppler_cpp;
 extern struct vpdf_ren vpdf_ren_gs;
 
-static struct {
-	char *id;
-	struct vpdf_ren *r;
-} const renderers[] = {
+static struct renderer const renderers[] = {
 #ifdef HAVE_POPPLER_GLIB
 	{ "poppler-cairo" , &vpdf_ren_poppler_glib, },
 #endif
@@ -626,8 +754,25 @@ static struct {
 #endif
 };
 
-#define VPDF_SYNC_REN_DUMP_PAT_PAT	"%s/%%04d-%s" PPM_SUFFIX
-#define VPDF_SYNC_VID_DUMP_PAT_PAT	"%s/%%04d-%%05d-%%6.4f" PPM_SUFFIX
+static const struct renderer * renderer_find_working(const char *ren_id)
+{
+	const struct renderer *rr = NULL;
+	for (unsigned i=0; !rr && i<ARRAY_SIZE(renderers); i++)
+		if ((!ren_id && renderers[i].r->can_render)
+		    || !strcmp(ren_id, renderers[i].id))
+			rr = &renderers[i];
+	if (!rr) {
+		if (!ren_id)
+			DIE(1, "error: no usable PDF renderers compiled in\n");
+		fprintf(stderr, "error: %s is not amongst the list of known "
+		                "PDF renderers:\n", ren_id);
+		for (unsigned i=0; i<ARRAY_SIZE(renderers); i++)
+			fprintf(stderr, "\t%s\n", renderers[i].id);
+		exit(1);
+	} else if (!rr->r->can_render)
+		DIE(1, "selected PDF renderer %s cannot render\n", ren_id);
+	return rr;
+}
 
 static void usage(const char *progname)
 {
@@ -723,52 +868,36 @@ static void libs(void)
 	        v >> 16, (v >> 8) & 0xff, v & 0xff);
 }
 
-#ifndef _GNU_SOURCE
-static int asprintf(char **ptr, const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	int len = vsnprintf(NULL, 0, fmt, ap);
-	va_end(ap);
-	if (len < 0) {
-		perror("vsnprintf");
-		return len;
-	}
-	char *buf = malloc(len+1);
-	if (!buf)
-		return -1;
-	va_start(ap, fmt);
-	len = vsnprintf(buf, len+1, fmt, ap);
-	va_end(ap);
-	*ptr = len < 0 ? free(buf), NULL : buf;
-	return len;
-}
-#endif
-
 int main(int argc, char **argv)
 {
+	struct loc_ctx ctx = LOC_CTX_INIT;
 	char *ren_id = NULL;
-	char *endptr;
 	double vid_diff_ssim = -INFINITY;
 	double rdiff_th = VPDF_SYNC_RDIFF_TH;
 	char *ren_dump_dir = NULL;
 	char *vid_dump_dir = NULL;
-	int crop[4] = {0,0,0,0};
-	const struct output *out = &outputs[OUT_HUMAN];
-
-	int page_from = 0;
-	int page_to   = -1;
-	int compress  = 0;
 	int frame_cmp_luma_only = 0;
-	int verbosity = 0;
-#ifdef HAVE_LZO
-	compress = 1;
-#endif
+	int crop[4] = {0,0,0,0};
+
+	ctx.out = &outputs[OUT_HUMAN];
+	ctx.page_from = 0;
+	ctx.page_to   = -1;
+	ctx.compress  = COMPRESS_INIT;
+	ctx.verbosity = 0;
+
 	int opt;
 	struct stat st;
+	char *endptr;
 	while ((opt = getopt(argc, argv, ":C:d:D:e:hjLp:r:RuvV:y")) != -1)
 		switch (opt) {
 		case 'C':
+			if (!strcmp(endptr, "detect")) {
+				crop[0] = -1;
+				crop[1] = -1;
+				crop[2] = -1;
+				crop[3] = -1;
+				break;
+			}
 			endptr = optarg;
 			for (unsigned i=0; i<ARRAY_SIZE(crop); i++) {
 				crop[i] = strtol(endptr, &endptr, 10);
@@ -798,7 +927,7 @@ int main(int argc, char **argv)
 			usage(argv[0]);
 			exit(0);
 		case 'j':
-			out = &outputs[OUT_JSON];
+			ctx.out = &outputs[OUT_JSON];
 			break;
 		case 'L':
 			libs();
@@ -806,19 +935,19 @@ int main(int argc, char **argv)
 		case 'p':
 			endptr = optarg;
 			if (*endptr == ':') {
-				page_from = 0;
+				ctx.page_from = 0;
 			} else {
-				page_from = strtol(endptr, &endptr, 10);
-				if (page_from-- <= 0)
+				ctx.page_from = strtol(endptr, &endptr, 10);
+				if (ctx.page_from-- <= 0)
 					DIE(1, "expected positive decimal parameter or nothing for FROM in option '-p'\n");
 			}
 			if (*endptr++ != ':')
 				DIE(1, "option -p requires a colon-separated range\n");
 			if (!*endptr) {
-				page_to = -1;
+				ctx.page_to = -1;
 			} else {
-				page_to = strtol(endptr, &endptr, 10);
-				if (*endptr || page_to <= 0)
+				ctx.page_to = strtol(endptr, &endptr, 10);
+				if (*endptr || ctx.page_to <= 0)
 					DIE(1, "expected positive decimal parameter or nothing for TO in option '-p'\n");
 			}
 			break;
@@ -828,8 +957,8 @@ int main(int argc, char **argv)
 		case 'R':
 			rens();
 			exit(0);
-		case 'u': compress = 0; break;
-		case 'v': verbosity++; break;
+		case 'u': ctx.compress = 0; break;
+		case 'v': ctx.verbosity++; break;
 		case 'V':
 			if (stat(vid_dump_dir = optarg, &st) != 0)
 				DIE(1, "unable to stat() '%s': %s\n", optarg, strerror(errno));
@@ -850,29 +979,13 @@ int main(int argc, char **argv)
 
 	int r;
 
-	struct vpdf_ren *ren = NULL;
-	for (unsigned i=0; !ren && i<ARRAY_SIZE(renderers); i++)
-		if ((!ren_id && renderers[i].r->can_render)
-		    || !strcmp(ren_id, renderers[i].id)) {
-			ren_id = renderers[i].id;
-			ren = renderers[i].r;
-		}
-	if (!ren) {
-		if (!ren_id)
-			DIE(1, "error: no usable PDF renderers compiled in\n");
-		fprintf(stderr, "error: %s is not amongst the list of known "
-		                "PDF renderers:\n", ren_id);
-		for (unsigned i=0; i<ARRAY_SIZE(renderers); i++)
-			fprintf(stderr, "\t%s\n", renderers[i].id);
-		exit(1);
-	} else if (!ren->can_render)
-		DIE(1, "selected PDF renderer %s cannot render\n", ren_id);
+	const struct renderer *rr = renderer_find_working(ren_id);
 
 	if (argc - optind < 1)
 		DIE(1, "error: expected arguments: VID ...\n");
 
 	const char *vid_path = argv[optind];
-	argv[optind] = ren_id;
+	argv[optind] = rr->id;
 	argc -= optind;
 	argv += optind;
 	optind = 1;
@@ -886,91 +999,46 @@ int main(int argc, char **argv)
 	struct ff_vinput vin = FF_VINPUT_INIT;
 	ff_vinput_open(&vin, vid_path);
 
-	unsigned w = vin.vid_ctx->width;
-	unsigned h = vin.vid_ctx->height;
-	if ((w|h) & (0xf >> (frame_cmp_luma_only ? 1 : 0)))
+	ctx.w = vin.vid_ctx->width;
+	ctx.h = vin.vid_ctx->height;
+	if ((ctx.w|ctx.h) & (0xf >> (frame_cmp_luma_only ? 1 : 0)))
 		DIE(1, "error: SSIM/PSNR computation only works for VID planes "
 		       "being dimensioned as multiples of 8\n");
 
-	if (crop[0]+crop[1] >= h || crop[2]+crop[3] >= w)
-		DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
-		       "for %ux%u images\n",
-		    crop[0], crop[1], crop[2], crop[3], w, h);
-
-	void *ren_inst = ren->create(argc, argv, w-crop[2]-crop[3], h-crop[0]-crop[1]);
-	if (!ren_inst)
-		DIE(1, "error creating renderer '%s': check its params\n", ren_id);
-	unsigned n_pages = ren->n_pages(ren_inst);
-
-	if (page_to < 0 || page_to > n_pages)
-		page_to = n_pages;
-	if (page_from > page_to)
-		DIE(1, "error: range [%d,%d] of pages to render is empty\n",
-		    page_from+1, page_to);
-	n_pages = page_to - page_from;
-	struct cimg *imgs[n_pages];
-	char *labels[n_pages];
-	memset(labels, 0, sizeof(labels));
-	struct loc_ctx ctx = {
-		w, h, labels, NULL, NULL, PIMG_INIT, PIMG_INIT, NULL,
-		-1, page_from, page_to, PIX_DESC_INIT,
-		NULL,
-		NULL,
-		out,
-		0, verbosity, compress,
-	};
-	pix_desc_init(&ctx.pix_desc, vin.vid_ctx->pix_fmt);
-	ctx.frame_cmp_nb_planes = frame_cmp_luma_only ? 1 : ctx.pix_desc.nb_planes;
-	if (ren_dump_dir)
-		asprintf(&ctx.ren_dump_pat, VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, ren_id);
-	if (vid_dump_dir)
-		asprintf(&ctx.vid_dump_pat, VPDF_SYNC_VID_DUMP_PAT_PAT, vid_dump_dir);
-	if ((r = av_image_alloc(ctx.tmp.planes, ctx.tmp.strides,
-	                        w, h, ctx.pix_desc.pix_fmt, 1)) < 0)
-		DIE(1, "error allocating raw video buffer: %s", fferror(r));
-
-	if (ctx.vid_dump_pat || ctx.ren_dump_pat) {
-		ctx.vid_sws = tform_sws_context(w, h, ctx.pix_desc.pix_fmt, AV_PIX_FMT_RGB24);
-		int r;
-		if ((r = av_image_alloc(ctx.vid_ppm.planes, ctx.vid_ppm.strides,
-		                        w, h, AV_PIX_FMT_RGB24, 1)) < 0)
-			DIE(1, "error allocating raw video buffer: %s", fferror(r));
+	if (crop[0] == -1 || crop[1] == -1 || crop[2] == -1 || crop[3] == -1) {
+		/* TODO */
 	}
 
-	if (compress) {
-		ctx.buf = imgs;
-	} else {
-		ctx.pbuf = calloc(page_to - page_from, sizeof(*ctx.pbuf));
-		for (int i=0; i<page_to-page_from; i++)
-			if ((r = av_image_alloc(ctx.pbuf[i].planes, ctx.pbuf[i].strides, w, h, ctx.pix_desc.pix_fmt, 1)) < 0)
-				DIE(1, "error allocating raw video buffer: %s\n", fferror(r));
-	}
+	loc_ctx_init(&ctx, rr, &vin, crop, frame_cmp_luma_only,
+	             ren_dump_dir, vid_dump_dir, argc, argv);
 
-	render(&ctx, ren, ren_inst, crop);
-	ren->destroy(ren_inst);
+	unsigned n_pages = ctx.page_to - ctx.page_from;
 
-	double vid_diff_ssims[page_to-page_from];
+	double vid_diff_ssims[n_pages];
 	if (vid_diff_ssim >= -1) {
-		for (unsigned i=0; i<page_to-page_from; i++)
+		for (unsigned i=0; i<n_pages; i++)
 			vid_diff_ssims[i] = vid_diff_ssim;
 	} else {
 		struct pimg diff_tmp = PIMG_INIT;
 		int diff_tmp_last_page_idx = -1;
 		if ((r = av_image_alloc(diff_tmp.planes, diff_tmp.strides,
-					w, h, ctx.pix_desc.pix_fmt, 1)) < 0)
+		                        ctx.w, ctx.h, ctx.pix_desc.pix_fmt, 1)) < 0)
 			DIE(1, "error allocating raw video buffer: %s", fferror(r));
-		for (int i=page_from; i<page_to; i++) {
+		for (int i=0; i<n_pages; i++) {
 			struct res r[2];
-			const struct pimg *img = frame_render(&ctx, i, &diff_tmp, &diff_tmp_last_page_idx);
-			locate((const uint8_t *const *)img->planes, img->strides, &ctx, i, ARRAY_SIZE(r), r);
-			/* allow 12.5% (normalized) more turbulence in the
-			 * VID frame than required min. SSIM threshold to
-			 * closest matching rendered frame */
+			const struct pimg *img;
+			img = frame_render(&ctx, ctx.page_from+i,
+			                   &diff_tmp, &diff_tmp_last_page_idx);
+			locate((const uint8_t *const *)img->planes, img->strides,
+			       &ctx, ctx.page_from+i, ARRAY_SIZE(r), r);
+			/* allow more turbulence in the VID frame than required
+			 * min. SSIM threshold to closest matching rendered
+			 * frame */
 			double rdiff = r[1].ssim;
-			vid_diff_ssims[i-page_from] = 1-(1-rdiff)*(1-rdiff_th);
+			vid_diff_ssims[i] = 1-(1-rdiff)*(1-rdiff_th);
 			if (ctx.verbosity > 0)
 				fprintf(stderr, "page %d max ssim %6.4f -> vid_diff_ssim = %6.4f\n",
-				        i+1, rdiff, vid_diff_ssims[i-page_from]);
+				        ctx.page_from+i+1, rdiff, vid_diff_ssims[i]);
 		}
 		av_freep(diff_tmp.planes);
 	}
@@ -982,25 +1050,7 @@ int main(int argc, char **argv)
 		free(i);
 	}
 
-	if (ctx.pbuf) {
-		for (int i=0; i<page_to-page_from; i++)
-			av_freep(ctx.pbuf[i].planes);
-		free(ctx.pbuf);
-	} else {
-		for (unsigned i=0; i<ARRAY_SIZE(imgs); i++)
-			free(imgs[i]);
-	}
-	for (int i=0; i<page_to-page_from; i++)
-		free(ctx.labels[i]);
-
-	if (ctx.vid_sws) {
-		sws_freeContext(ctx.vid_sws);
-		av_freep(ctx.vid_ppm.planes);
-	}
-
-	av_freep(ctx.tmp.planes);
-	free(ctx.ren_dump_pat);
-	free(ctx.vid_dump_pat);
+	loc_ctx_fini(&ctx);
 
 	ff_vinput_close(&vin);
 }
