@@ -132,7 +132,7 @@ C_SRCS    = $(filter %.c,$(SRCS))
 CXX_SRCS  = $(filter %.cc,$(SRCS))
 C_OBJS    = $(C_SRCS:.c=.o)
 CXX_OBJS  = $(CXX_SRCS:.cc=.o)
-OBJS     += $(C_OBJS) $(CXX_OBJS) ssim-impl.o
+OBJS     += $(C_OBJS) $(CXX_OBJS) ssim-impl.o plane-add.o
 
 ifneq ($(findstring openmp,$(OPTS)),)
  vpdf-sync.o: override CFLAGS += -fopenmp

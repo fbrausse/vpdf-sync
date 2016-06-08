@@ -16,20 +16,22 @@ struct vpdf_image {
 
 struct img_prep_args;
 
+typedef void vpdf_image_prepare_f(
+	struct vpdf_image *img, const struct img_prep_args *args,
+	unsigned page_idx, char *label
+);
+
 struct vpdf_ren {
 	void * (*create )(int argc, char **argv, unsigned w, unsigned h);
 	void   (*destroy)(void *);
 	int    (*n_pages)(void *);
 	void   (*render )(void *, int page_from, int page_to,
-	                  const struct img_prep_args *img_prep_args);
+	                  vpdf_image_prepare_f *prep,
+	                  const struct img_prep_args *args);
 	enum AVPixelFormat fmt;
 	int can_render;
 };
 
-void vpdf_image_prepare(
-	struct vpdf_image *img, const struct img_prep_args *img_prep_args,
-	unsigned page_idx, char *label
-);
 
 C_NAMESPACE_END
 

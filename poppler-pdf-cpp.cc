@@ -154,7 +154,8 @@ static char * ustringtomb(const ustring &us)
 
 static void render(
 	void *const _ren, const int page_from, const int page_to,
-	const struct img_prep_args *const img_prep_args
+	vpdf_image_prepare_f *prep,
+	const struct img_prep_args *const args
 ) {
 	const poppler_cpp_ren *const ren = (poppler_cpp_ren *)_ren;
 #ifdef _OPENMP
@@ -189,7 +190,7 @@ static void render(
 #ifdef _OPENMP
 # pragma omp critical
 #endif
-		vpdf_image_prepare(&img, img_prep_args, page_idx, label);
+		prep(&img, args, page_idx, label);
 	}
 }
 

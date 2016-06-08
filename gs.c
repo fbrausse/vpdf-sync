@@ -16,7 +16,8 @@ C_NAMESPACE_BEGIN
 
 struct dsp {
 	struct vpdf_image img;
-	const struct img_prep_args *img_prep_args;
+	vpdf_image_prepare_f *prep;
+	const struct img_prep_args *args;
 	unsigned page_idx;
 };
 
@@ -70,8 +71,7 @@ static int display_page(void *handle, void *device, int copies, int flush)
 	fprintf(stderr, "%s(copies=%d, flush=%d)\n", __func__, copies, flush);
 */
 	struct dsp *d = handle;
-	vpdf_image_prepare(&d->img, d->img_prep_args, d->page_idx++,
-	                   NULL /* TODO */);
+	d->prep(&d->img, d->args, d->page_idx++, NULL /* TODO */);
 	return 0;
 }
 
@@ -215,12 +215,15 @@ static void * create(int argc, char **argv, unsigned w, unsigned h)
 	return gs;
 }
 
-static void render(void *_ren, int page_from, int page_to, const struct img_prep_args *img_prep_args)
-{
+static void render(
+	void *_ren, int page_from, int page_to,
+	vpdf_image_prepare_f *prep, const struct img_prep_args *args
+) {
 	struct gs *gs = _ren;
 	char cmd[64];
 	snprintf(cmd, sizeof(cmd), "%d %d dopdfpages\n", page_from+1, page_to);
-	gs->d.img_prep_args = img_prep_args;
+	gs->d.prep = prep;
+	gs->d.args = args;
 	int r, user_error;
 	fprintf(stderr, "gs-render(%d,%d)\n", page_from, page_to);
 	gs->d.page_idx = page_from;

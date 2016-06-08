@@ -28,8 +28,10 @@ struct poppler_glib_ren {
 	cairo_t         *cr;
 };
 
-static void render(void *_ren, int page_from, int page_to, const struct img_prep_args *img_prep_args)
-{
+static void render(
+	void *_ren, int page_from, int page_to,
+	vpdf_image_prepare_f *prep, const struct img_prep_args *args
+) {
 	struct poppler_glib_ren *ren = (struct poppler_glib_ren *)_ren;
 
 	struct vpdf_image img;
@@ -64,7 +66,7 @@ static void render(void *_ren, int page_from, int page_to, const struct img_prep
 			free(label);
 			label = tmp;
 		}
-		vpdf_image_prepare(&img, img_prep_args, page_idx, label);
+		prep(&img, args, page_idx, label);
 		g_object_unref(page);
 	}
 }

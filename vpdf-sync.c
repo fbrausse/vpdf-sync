@@ -26,6 +26,8 @@
 # define PLANE_CMP2_EXTRA_FLAGS		0
 #endif
 
+#define VPDF_SYNC_CROPDET_FRAC		0x1p-8	/* sth like 4% */
+
 C_NAMESPACE_BEGIN
 
 #include "ssim-impl.h"
@@ -459,6 +461,153 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 	return head;
 }
 
+#include "plane-add-generic.h"
+
+#if defined(__i386__) || defined(__x86_64__)
+# include "plane-add-x86_64.h"
+# ifndef PLANE_ADD_IMPL
+#  define PLANE_ADD_IMPL	plane_add_x86_64()
+# endif
+#endif
+
+#ifndef PLANE_ADD_IMPL
+# define PLANE_ADD_IMPL		plane_add_generic
+#endif
+
+struct range {
+	unsigned a, b;
+};
+
+static struct range range_det(
+	unsigned n, const unsigned a[static n], unsigned lo, unsigned hi,
+	unsigned thresh
+) {
+	struct range r;
+	for (r.a=0; r.a<n; r.a++) {
+		int d = (int)a[r.a] - (int)lo;
+		if (d < 0)
+			d = -d;
+		if (d < thresh)
+			break;
+	}
+	for (r.b=n; r.b>r.a; r.b--) {
+		int d = (int)a[r.b-1] - (int)hi;
+		if (d < 0)
+			d = -d;
+		if (d < thresh)
+			break;
+	}
+	return r;
+}
+
+static int cropdet(
+	struct loc_ctx *ctx, struct ff_vinput *vin,
+	unsigned crop_detect, int crop[static 4]
+) {
+	int crop_save[4];
+	memcpy(crop_save, crop, sizeof(crop_save));
+
+	/* assumption: uniformity in slides and video
+	 *        and  slides take up major spatial space in video
+	 *        and  video's non-slide background differs enough from slides'
+	 *             borders average intensity/color */
+
+	unsigned n = ctx->pix_desc.nb_planes;
+	int is_yuv = n < 3 || ~ctx->pix_desc.d->flags & AV_PIX_FMT_FLAG_RGB;
+
+	uint32_t *slides[2][n], *frames[2][n];
+	unsigned w[n], h[n];
+	for (unsigned j=0; j<n; j++) {
+		w[j] = ctx->w >> (is_yuv && j ? ctx->pix_desc.d->log2_chroma_w : 0);
+		h[j] = ctx->h >> (is_yuv && j ? ctx->pix_desc.d->log2_chroma_h : 0);
+		slides[0][j] = calloc(w[j], sizeof(uint32_t));
+		slides[1][j] = calloc(h[j], sizeof(uint32_t));
+		frames[0][j] = calloc(w[j], sizeof(uint32_t));
+		frames[1][j] = calloc(h[j], sizeof(uint32_t));
+	}
+
+	plane_add_f *plane_add = PLANE_ADD_IMPL;
+	for (int i=ctx->page_from; i<ctx->page_to; i++) {
+		frame_render(ctx, i, &ctx->tmp, &ctx->tmp_page_idx);
+		for (unsigned j=0; j<n; j++) {
+			plane_add(slides[0][j], slides[1][j], ctx->tmp.planes[j],
+			          w[j], h[j], ctx->tmp.strides[j]);
+			unsigned *s0 = slides[0][j];
+			for (unsigned k=0; k<w[j]; k++)
+				*s0 = (*s0 + h[j]/2) / h[j];
+			unsigned *s1 = slides[1][j];
+			for (unsigned k=0; k<h[j]; k++)
+				*s1 = (*s1 + w[j]/2) / w[j];
+		}
+	}
+
+	AVFrame *fr = av_frame_alloc();
+	int64_t ts = 0;
+	unsigned frame_idx;
+	for (frame_idx = 0; ff_vinput_read_frame(vin, fr, frame_idx); frame_idx++) {
+		if (frame_idx == 0 && (ts = fr->pts) == AV_NOPTS_VALUE)
+			ts = fr->pkt_pts;
+		for (unsigned j=0; j<n; j++) {
+			plane_add(frames[0][j], slides[1][j], fr->data[j],
+			          w[j], h[j], fr->linesize[j]);
+			unsigned *f0 = frames[0][j];
+			for (unsigned k=0; k<w[j]; k++, f0++)
+				*f0 = (*f0 + h[j]/2) / h[j];
+			unsigned *f1 = frames[1][j];
+			for (unsigned k=0; k<h[j]; k++)
+				*f1 = (*f1 + w[j]/2) / w[j];
+		}
+	}
+	av_frame_free(&fr);
+
+	struct range r[2][n];
+	for (unsigned j=0; j<n; j++) {
+		for (int i=0; i<w[j]; i++) {
+			slides[0][j][i] /= ctx->page_to - ctx->page_from;
+			frames[0][j][i] /= frame_idx;
+		}
+		for (int i=0; i<h[j]; i++) {
+			slides[1][j][i] /= ctx->page_to - ctx->page_from;
+			frames[1][j][i] /= frame_idx;
+		}
+		r[0][j] = range_det(w[j], frames[0][j], slides[0][j][0], slides[0][j][w[j]-1], 8);
+		r[1][j] = range_det(h[j], frames[1][j], slides[1][j][0], slides[1][j][h[j]-1], 8);
+	}
+
+	/* seek vin back to initial ts */
+	int ret = av_seek_frame(vin->fmt_ctx, vin->vid_stream_idx, ts, AVSEEK_FLAG_BACKWARD);
+	if (ret < 0)
+		DIE(1, "error rewinding VID stream: %s\n", fferror(ret));
+
+	for (unsigned j=0; j<n; j++)
+		for (unsigned k=0; k<2; k++) {
+			free(slides[k][j]);
+			free(frames[k][j]);
+		}
+
+	if (is_yuv) {
+		if (crop_detect & 1)
+			crop[0] = r[1][0].a;
+		else if (crop[0] != r[1][0].a)
+			fprintf(stderr, "crop-detect found T = %u better than given %u\n", r[1][0].a, crop[0]);
+		if (crop_detect & 2)
+			crop[1] = ctx->h - r[1][0].b;
+		else if (crop[1] != r[1][0].b)
+			fprintf(stderr, "crop-detect found B = %u better than given %u\n", r[1][0].b, crop[1]);
+		if (crop_detect & 4)
+			crop[2] = r[0][0].a;
+		else if (crop[2] != r[0][0].a)
+			fprintf(stderr, "crop-detect found L = %u better than given %u\n", r[0][0].a, crop[2]);
+		if (crop_detect & 8)
+			crop[3] = ctx->w - r[0][0].b;
+		else if (crop[3] != r[0][0].b)
+			fprintf(stderr, "crop-detect found R = %u better than given %u\n", r[0][0].b, crop[3]);
+	} else
+		DIE(1, "haven't thought about cropping non-YUV streams yet, sorry\n");
+
+	return memcmp(crop, crop_save, sizeof(crop_save)) != 0;
+}
+
 struct img_prep_args {
 	struct SwsContext *sws;
 	struct loc_ctx    *ctx;
@@ -474,7 +623,7 @@ struct img_prep_args {
 
 static const uint8_t black[][4] = { { 0,0,0,0 }, { 0x10,0x80,0x80,0x00 }, };
 
-void vpdf_image_prepare(
+static void vpdf_image_prepare(
 	struct vpdf_image *img, const struct img_prep_args *a,
 	unsigned page_idx, char *label
 ) {
@@ -563,11 +712,17 @@ void vpdf_image_prepare(
 		for (unsigned j=0; j<tgt_nb_planes; j++)
 			c->lens[j] = kj[j];
 		memcpy(c->data, a->compressed_buf, k);
-		a->ctx->buf[page_idx - a->ctx->page_from] = c;
+		struct cimg **cimg_ptr = &a->ctx->buf[page_idx - a->ctx->page_from];
+		if (*cimg_ptr)
+			free(*cimg_ptr);
+		*cimg_ptr = c;
 #endif
 	}
 
-	a->ctx->labels[page_idx - a->ctx->page_from] = label;
+	char **lbl_ptr = &a->ctx->labels[page_idx - a->ctx->page_from];
+	if (*lbl_ptr)
+		free(*lbl_ptr);
+	*lbl_ptr = label;
 
 	if (a->ctx->verbosity > 0) {
 		fprintf(stderr, "\n");
@@ -610,7 +765,7 @@ static void render(
 		DIE(1, "error: VID's pix_fmt '%s' is a bitstream, that's unsupported\n", a.d->name);
 
 	gettimeofday(a.u, NULL);
-	ren->render(ren_inst, ctx->page_from, ctx->page_to, &a);
+	ren->render(ren_inst, ctx->page_from, ctx->page_to, vpdf_image_prepare, &a);
 
 	sws_freeContext(a.sws);
 }
@@ -645,36 +800,13 @@ static int asprintf(char **ptr, const char *fmt, ...)
 #define VPDF_SYNC_REN_DUMP_PAT_PAT	"%s/%%04d-%s" PPM_SUFFIX
 #define VPDF_SYNC_VID_DUMP_PAT_PAT	"%s/%%04d-%%05d-%%6.4f" PPM_SUFFIX
 
-/* ctx needs valid values for: .w, .h, .verbosity, .compress
- *           reused are      : .page_{from,to}
- */
-static void loc_ctx_init(
+static void loc_ctx_init_vid(
 	struct loc_ctx *ctx, const struct renderer *rr, struct ff_vinput *vin,
-	const int crop[static 4], int frame_cmp_luma_only,
-	const char *ren_dump_dir, const char *vid_dump_dir,
-	int argc, char **argv
+	int frame_cmp_luma_only,
+	const char *ren_dump_dir, const char *vid_dump_dir
 ) {
 	int r;
-	if (crop[0]+crop[1] >= ctx->h || crop[2]+crop[3] >= ctx->w)
-		DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
-		       "for %ux%u images\n",
-		    crop[0], crop[1], crop[2], crop[3], ctx->w, ctx->h);
 
-	struct vpdf_ren *ren = rr->r;
-	void *ren_inst = ren->create(argc, argv, ctx->w - crop[2] - crop[3],
-	                                         ctx->h - crop[0] - crop[1]);
-	if (!ren_inst)
-		DIE(1, "error creating renderer '%s': check its params\n", rr->id);
-	unsigned n_pages = ren->n_pages(ren_inst);
-
-	if (ctx->page_to < 0 || ctx->page_to > n_pages)
-		ctx->page_to = n_pages;
-	if (ctx->page_from > ctx->page_to)
-		DIE(1, "error: range [%d,%d] of pages to render is empty\n",
-		    ctx->page_from+1, ctx->page_to);
-	n_pages = ctx->page_to - ctx->page_from;
-
-	ctx->labels    = calloc(n_pages, sizeof(char *));
 	pix_desc_init(&ctx->pix_desc, vin->vid_ctx->pix_fmt);
 	if (ren_dump_dir)
 		asprintf(&ctx->ren_dump_pat, VPDF_SYNC_REN_DUMP_PAT_PAT, ren_dump_dir, rr->id);
@@ -693,24 +825,50 @@ static void loc_ctx_init(
 		                        ctx->w, ctx->h, AV_PIX_FMT_RGB24, 1)) < 0)
 			DIE(1, "error allocating raw video buffer: %s", fferror(r));
 	}
+}
+
+/* ctx needs valid values for: .w, .h, .verbosity, .compress
+ *           reused are      : .page_{from,to}
+ */
+static void loc_ctx_init_ren(struct loc_ctx *ctx, unsigned *n_pages)
+{
+	int r;
+
+	if (ctx->page_to < 0 || ctx->page_to > *n_pages)
+		ctx->page_to = *n_pages;
+	if (ctx->page_from > ctx->page_to)
+		DIE(1, "error: range [%d,%d] of pages to render is empty\n",
+		    ctx->page_from+1, ctx->page_to);
+	*n_pages = ctx->page_to - ctx->page_from;
+
+	ctx->labels = calloc(*n_pages, sizeof(char *));
 
 	if (ctx->compress) {
-		ctx->buf = malloc(sizeof(struct cimg *) * n_pages);
+		ctx->buf = calloc(*n_pages, sizeof(struct cimg *));
 	} else {
-		ctx->pbuf = calloc(n_pages, sizeof(*ctx->pbuf));
-		for (int i=0; i<n_pages; i++)
+		ctx->pbuf = calloc(*n_pages, sizeof(*ctx->pbuf));
+		for (int i=0; i<*n_pages; i++)
 			if ((r = av_image_alloc(ctx->pbuf[i].planes,
 			                        ctx->pbuf[i].strides,
 			                        ctx->w, ctx->h,
 			                        ctx->pix_desc.pix_fmt, 1)) < 0)
 				DIE(1, "error allocating raw video buffer: %s\n", fferror(r));
 	}
-
-	render(ctx, ren, ren_inst, crop);
-	ren->destroy(ren_inst);
 }
 
-static void loc_ctx_fini(struct loc_ctx *ctx)
+static void loc_ctx_fini_vid(struct loc_ctx *ctx)
+{
+	if (ctx->vid_sws) {
+		sws_freeContext(ctx->vid_sws);
+		av_freep(ctx->vid_ppm.planes);
+	}
+
+	av_freep(ctx->tmp.planes);
+	free(ctx->ren_dump_pat);
+	free(ctx->vid_dump_pat);
+}
+
+static void loc_ctx_fini_ren(struct loc_ctx *ctx)
 {
 	unsigned n_pages = ctx->page_to-ctx->page_from;
 
@@ -727,15 +885,12 @@ static void loc_ctx_fini(struct loc_ctx *ctx)
 	for (int i=0; i<n_pages; i++)
 		free(ctx->labels[i]);
 	free(ctx->labels);
+}
 
-	if (ctx->vid_sws) {
-		sws_freeContext(ctx->vid_sws);
-		av_freep(ctx->vid_ppm.planes);
-	}
-
-	av_freep(ctx->tmp.planes);
-	free(ctx->ren_dump_pat);
-	free(ctx->vid_dump_pat);
+static void loc_ctx_fini(struct loc_ctx *ctx)
+{
+	loc_ctx_fini_ren(ctx);
+	loc_ctx_fini_vid(ctx);
 }
 
 extern struct vpdf_ren vpdf_ren_poppler_glib;
@@ -783,7 +938,8 @@ static void usage(const char *progname)
   REN_OPTS...  options to slide renderer, see options '-R' and '-r' for details\n\
 \n\
 Options [defaults]:\n\
-  -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]\n\
+  -C T:B:L:R   pad pixels to renderings wrt. VID; < 0 to detect [0:0:0:0]\n\
+  -C detect    detect the cropping area based on the average intensity of slides\n\
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]\n\
                (overrides -e)\n\
   -D DIR       dump rendered images into DIR (named PAGE-REN" PPM_SUFFIX ")\n\
@@ -891,7 +1047,7 @@ int main(int argc, char **argv)
 	while ((opt = getopt(argc, argv, ":C:d:D:e:hjLp:r:RuvV:y")) != -1)
 		switch (opt) {
 		case 'C':
-			if (!strcmp(endptr, "detect")) {
+			if (!strcmp(optarg, "detect")) {
 				crop[0] = -1;
 				crop[1] = -1;
 				crop[2] = -1;
@@ -903,8 +1059,6 @@ int main(int argc, char **argv)
 				crop[i] = strtol(endptr, &endptr, 10);
 				if (*endptr++ != (i == 3 ? '\0' : ':'))
 					DIE(1, "option -C expects format to be T:B:L:R\n");
-				if (crop[i] < 0)
-					DIE(1, "option -C requires non-negative integer parameters\n");
 			}
 			break;
 		case 'd':
@@ -1005,14 +1159,41 @@ int main(int argc, char **argv)
 		DIE(1, "error: SSIM/PSNR computation only works for VID planes "
 		       "being dimensioned as multiples of 8\n");
 
-	if (crop[0] == -1 || crop[1] == -1 || crop[2] == -1 || crop[3] == -1) {
-		/* TODO */
+	loc_ctx_init_vid(&ctx, rr, &vin, frame_cmp_luma_only,
+	                 ren_dump_dir, vid_dump_dir);
+
+	unsigned crop_detect = 0;
+	for (unsigned i=0; i<ARRAY_SIZE(crop); i++)
+		if (crop[i] < 0) { crop_detect |= 1 << i; crop[i] = 0; }
+
+	if (crop[0]+crop[1] >= ctx.h || crop[2]+crop[3] >= ctx.w)
+		DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
+		       "for %ux%u images\n",
+		    crop[0], crop[1], crop[2], crop[3], ctx.w, ctx.h);
+
+	struct vpdf_ren *ren = rr->r;
+	void *ren_inst = ren->create(argc, argv, ctx.w - crop[2] - crop[3],
+	                                         ctx.h - crop[0] - crop[1]);
+	if (!ren_inst)
+		DIE(1, "error creating renderer '%s': check its params\n",
+		    rr->id);
+
+	unsigned n_pages = ren->n_pages(ren_inst);
+	loc_ctx_init_ren(&ctx, &n_pages);
+
+	render(&ctx, ren, ren_inst, crop);
+	ren->destroy(ren_inst);
+
+	if (crop_detect && cropdet(&ctx, &vin, crop_detect, crop)) { /* modifies crop */
+		optind = 1;
+		ren_inst = ren->create(argc, argv, ctx.w - crop[2] - crop[3],
+		                                   ctx.h - crop[0] - crop[1]);
+		if (!ren_inst)
+			DIE(1, "error creating renderer '%s': check its params\n",
+			    rr->id);
+		render(&ctx, ren, ren_inst, crop);
+		ren->destroy(ren_inst);
 	}
-
-	loc_ctx_init(&ctx, rr, &vin, crop, frame_cmp_luma_only,
-	             ren_dump_dir, vid_dump_dir, argc, argv);
-
-	unsigned n_pages = ctx.page_to - ctx.page_from;
 
 	double vid_diff_ssims[n_pages];
 	if (vid_diff_ssim >= -1) {
