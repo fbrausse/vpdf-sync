@@ -1,18 +1,15 @@
-#if defined(__APPLE__) && defined(__MACH__)
-# define FUNC(name)	_ ## name
-#else
-# define FUNC(name)	name
-#endif
+
+#include "mangling.h"
 
 	.text
 
 	.p2align	5
-	.globl		FUNC(mse)
-#	.type		FUNC(mse), @function
+	.globl		ASM_C_FUNC(mse)
+#	.type		ASM_C_FUNC(mse), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mse)
 ################################################################################
-FUNC(mse):
+ASM_C_FUNC(mse):
 	pxor		%xmm15, %xmm15
 
 	movq		(%rdi), %xmm0
@@ -100,12 +97,12 @@ FUNC(mse):
 
 
 	.p2align 5
-	.globl	FUNC(covar_1)
-#	.type	FUNC(covar_1), @function
+	.globl	ASM_C_FUNC(covar_1)
+#	.type	ASM_C_FUNC(covar_1), @function
 ################################################################################
 # int32_t(const void *in1, const void *in2, uint32_t stride, uint32_t *mean)
 ################################################################################
-FUNC(covar_1):
+ASM_C_FUNC(covar_1):
 	lea		(%rdx,%rdx,2), %r8	# 3*stride
 
 	movq		(%rdi       ), %xmm0
@@ -233,12 +230,12 @@ FUNC(covar_1):
 	ret
 
 	.p2align 5
-	.globl	FUNC(var_1)
-#	.type	FUNC(var_1), @function
+	.globl	ASM_C_FUNC(var_1)
+#	.type	ASM_C_FUNC(var_1), @function
 ################################################################################
 # int64_t(const void *in1, const void *in2, unsigned stride, uint32_t mu)
 ################################################################################
-FUNC(var_1):
+ASM_C_FUNC(var_1):
 	pxor		%xmm8, %xmm8
 
 	movd		%rcx, %xmm9		# 2 [ 00 .. 00  µy µx ]
@@ -349,12 +346,12 @@ FUNC(var_1):
 
 
 	.p2align 5
-	.globl	FUNC(covar_2)
-#	.type	FUNC(covar_2), @function
+	.globl	ASM_C_FUNC(covar_2)
+#	.type	ASM_C_FUNC(covar_2), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, const unsigned *mu, long long *covar)
 ################################################################################
-FUNC(covar_2):
+ASM_C_FUNC(covar_2):
 	movd		(%rcx), %xmm9		# 2 [ 00 .. 00  µy µx ]
 	punpcklwd	%xmm9, %xmm9		# 2 [ 00 .. 00  µy µy µx µx ]
 	pshufd		$0x55, %xmm9, %xmm10	# 2 [ µy .. µy ]
@@ -485,12 +482,12 @@ FUNC(covar_2):
 
 
 	.p2align 5
-	.globl	FUNC(mu_var_2x8x8_2)
-#	.type	FUNC(mu_var_2x8x8_2), @function
+	.globl	ASM_C_FUNC(mu_var_2x8x8_2)
+#	.type	ASM_C_FUNC(mu_var_2x8x8_2), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mu, long *var)
 ################################################################################
-FUNC(mu_var_2x8x8_2):
+ASM_C_FUNC(mu_var_2x8x8_2):
 	mov		%rdx, %r9
 
 	pxor		%xmm8, %xmm8
@@ -654,12 +651,12 @@ FUNC(mu_var_2x8x8_2):
 
 
 	.p2align 5
-	.globl	FUNC(mu_var_2x8x8_2_covar)
-#	.type	FUNC(mu_var_2x8x8_2_covar), @function
+	.globl	ASM_C_FUNC(mu_var_2x8x8_2_covar)
+#	.type	ASM_C_FUNC(mu_var_2x8x8_2_covar), @function
 ################################################################################
 # (const void *in1, const void *in2, unsigned stride, unsigned *mu, long *var, long long *covar)
 ################################################################################
-FUNC(mu_var_2x8x8_2_covar):
+ASM_C_FUNC(mu_var_2x8x8_2_covar):
 	mov		%rdx, %r9	# TODO: covar!!
 
 	pxor		%xmm8, %xmm8
@@ -991,12 +988,12 @@ FUNC(mu_var_2x8x8_2_covar):
 
 
 	.p2align	5
-	.globl		sad_8x8
-#	.type		sad, @function
+	.globl		ASM_C_FUNC(sad_16x16)
+#	.type		ASM_C_FUNC(sad_16x16), @function
 ################################################################################
 # unsigned(const void *in1, const void *in2, unsigned stride)
 ################################################################################
-FUNC(sad_16x16):
+ASM_C_FUNC(sad_16x16):
 	lea		(%rdx,%rdx,2),	%rcx	# 3*stride
 	lea		(%rdi,%rcx),	%r9	# in1+3*stride
 

@@ -2,6 +2,10 @@
 #ifndef PLANE_ADD_GENERIC
 #define PLANE_ADD_GENERIC
 
+#include "common.h"
+
+C_NAMESPACE_BEGIN
+
 typedef void plane_add_f(
 	unsigned *restrict, unsigned *restrict,
 	const uint8_t *restrict, unsigned, unsigned, unsigned);
@@ -59,5 +63,7 @@ static void plane_add_generic(
 	plane_add_j(vy, p, w, h, stride);
 }
 #endif
+
+C_NAMESPACE_END
 
 #endif

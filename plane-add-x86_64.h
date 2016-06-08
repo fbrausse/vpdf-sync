@@ -4,6 +4,8 @@
 
 #include "plane-add-generic.h"
 
+C_NAMESPACE_BEGIN
+
 #ifdef __x86_64__
 void plane_add_i8x8_asm(
 	unsigned *restrict q, unsigned *restrict v, const uint8_t *restrict p,
@@ -174,5 +176,7 @@ static plane_add_f * plane_add_x86_64(void)
 	//fprintf(stderr, "using generic\n");
 	return plane_add_generic;
 }
+
+C_NAMESPACE_END
 
 #endif

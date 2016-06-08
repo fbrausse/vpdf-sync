@@ -1,3 +1,6 @@
+
+#include "mangling.h"
+
 # amd64 code, SSSE3
 # Registers RBP, RBX, and R12–R15 are callee-save registers;
 # all others must be saved by the caller if it wishes to preserve their values.
@@ -5,8 +8,8 @@
 	.text
 
 	.p2align	5
-	.globl		plane_add_i8x8_asm
-	.type		plane_add_i8x8_asm, @function
+	.globl		ASM_C_FUNC(plane_add_i8x8_asm)
+#	.type		ASM_C_FUNC(plane_add_i8x8_asm), @function
 ################################################################################
 # %rdi: unsigned *restrict q,
 # %rsi: unsigned *restrict v,
@@ -15,7 +18,7 @@
 # %r8 : unsigned n,
 # %r9 : unsigned mstride
 ################################################################################
-plane_add_i8x8_asm:
+ASM_C_FUNC(plane_add_i8x8_asm):
 	pxor		%xmm15, %xmm15
 
 	lea		(%rdx,%r9), %r10	# p+mstride
@@ -64,12 +67,12 @@ plane_add_i8x8_asm:
 #	add		$0x10, %rdi
 
 	ret
-	.size plane_add_i8x8_asm, .-plane_add_i8x8_asm
+#	.size ASM_C_FUNC(plane_add_i8x8_asm), .-ASM_C_FUNC(plane_add_i8x8_asm)
 
 
 	.p2align	5
-	.globl		plane_add_j8x8_asm
-	.type		plane_add_j8x8_asm, @function
+	.globl		ASM_C_FUNC(plane_add_j8x8_asm)
+#	.type		ASM_C_FUNC(plane_add_j8x8_asm), @function
 ################################################################################
 # %rdi: unsigned *restrict q,
 # %rsi: unsigned *restrict v,
@@ -78,7 +81,7 @@ plane_add_i8x8_asm:
 # %r8 : unsigned n,
 # %r9 : unsigned nstride
 ################################################################################
-plane_add_j8x8_asm:
+ASM_C_FUNC(plane_add_j8x8_asm):
 	pxor		%xmm15, %xmm15
 
 	lea		(%rdx,%r9), %r10	# p+nstride
@@ -127,20 +130,20 @@ plane_add_j8x8_asm:
 #	add		$0x10, %rdi
 
 	ret
-	.size plane_add_j8x8_asm, .-plane_add_j8x8_asm
+#	.size ASM_C_FUNC(plane_add_j8x8_asm), .-ASM_C_FUNC(plane_add_j8x8_asm)
 
 
 
 	.p2align	5
-	.globl		plane_add_ij8x8_asm
-	.type		plane_add_ij8x8_asm, @function
+	.globl		ASM_C_FUNC(plane_add_ij8x8_asm)
+#	.type		ASM_C_FUNC(plane_add_ij8x8_asm), @function
 ################################################################################
 # %rdi: unsigned *restrict v,
 # %rsi: unsigned *restrict w,
 # %rdx: const uint8_t *restrict p,
 # %rcx: unsigned stride
 ################################################################################
-plane_add_ij8x8_asm:
+ASM_C_FUNC(plane_add_ij8x8_asm):
 	pxor		%xmm15, %xmm15
 
 	lea		(%rdx,%rcx  ), %r8	# p+stride
@@ -212,20 +215,20 @@ plane_add_ij8x8_asm:
 	movdqa		%xmm9, (%r9 )
 
 	ret
-	.size plane_add_ij8x8_asm, .-plane_add_ij8x8_asm
+#	.size ASM_C_FUNC(plane_add_ij8x8_asm), .-ASM_C_FUNC(plane_add_ij8x8_asm)
 
 
 
 	.p2align	5
-	.globl		plane_add_ij4x16_asm
-	.type		plane_add_ij4x16_asm, @function
+	.globl		ASM_C_FUNC(plane_add_ij4x16_asm)
+#	.type		ASM_C_FUNC(plane_add_ij4x16_asm), @function
 ################################################################################
 # %rdi: unsigned *restrict v,
 # %rsi: unsigned *restrict w,
 # %rdx: const uint8_t *restrict p,
 # %rcx: unsigned stride
 ################################################################################
-plane_add_ij4x16_asm:
+ASM_C_FUNC(plane_add_ij4x16_asm):
 	pxor		%xmm15, %xmm15
 
 	lea		(%rdx,%rcx  ), %rax	# p+stride
@@ -290,13 +293,13 @@ plane_add_ij4x16_asm:
 	movdqa		%xmm9, 0x30(%rdi)
 
 	ret
-	.size plane_add_ij4x16_asm, .-plane_add_ij4x16_asm
+#	.size ASM_C_FUNC(plane_add_ij4x16_asm), .-ASM_C_FUNC(plane_add_ij4x16_asm)
 
 
 
 	.p2align	5
-	.globl		plane_madd_ij4x16_asm
-	.type		plane_madd_ij4x16_asm, @function
+	.globl		ASM_C_FUNC(plane_madd_ij4x16_asm)
+#	.type		ASM_C_FUNC(plane_madd_ij4x16_asm), @function
 ################################################################################
 # %rdi: unsigned *restrict v,
 # %rsi: unsigned *restrict w,
@@ -304,7 +307,7 @@ plane_add_ij4x16_asm:
 # %rcx: unsigned stride
 # %r8 : unsigned *restrict x
 ################################################################################
-plane_madd_ij4x16_asm:
+ASM_C_FUNC(plane_madd_ij4x16_asm):
 	pxor		%xmm15, %xmm15
 
 	lea		(%rdx,%rcx  ), %rax	# p+stride
@@ -369,4 +372,4 @@ plane_madd_ij4x16_asm:
 	movdqa		%xmm9, 0x30(%rdi)
 
 	ret
-	.size plane_madd_ij4x16_asm, .-plane_madd_ij4x16_asm
+#	.size ASM_C_FUNC(plane_madd_ij4x16_asm), .-ASM_C_FUNC(plane_madd_ij4x16_asm)
