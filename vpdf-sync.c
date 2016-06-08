@@ -545,6 +545,10 @@ static int cropdet(
 	for (frame_idx = 0; ff_vinput_read_frame(vin, fr, frame_idx); frame_idx++) {
 		if (frame_idx == 0 && (ts = fr->pts) == AV_NOPTS_VALUE)
 			ts = fr->pkt_pts;
+		if (ctx->verbosity > 0) {
+			fprintf(stderr, "averaging video frames: %u\r", frame_idx);
+			fflush(stderr);
+		}
 		for (unsigned j=0; j<n; j++) {
 			plane_add(vx, vy, fr->data[j], w[j], h[j], fr->linesize[j]);
 			for (unsigned k=0; k<w[j]; k++)
@@ -553,6 +557,8 @@ static int cropdet(
 				frames[1][j][k] += (vy[k] + w[j]/2-1) / w[j];
 		}
 	}
+	if (ctx->verbosity > 0)
+		fprintf(stderr, "\n");
 	av_frame_free(&fr);
 
 	struct range r[2][n];
@@ -569,21 +575,25 @@ static int cropdet(
 		r[1][j] = range_det(h[j], frames[1][j], slides[1][j][0], slides[1][j][h[j]-1], 8);
 	}
 
-	for (unsigned i=0; i<w[0]; i++) {
-		fprintf(stderr, "x:%u", i);
-		for (unsigned j=0; j<n && i<w[j]; j++)
-			fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
-		fprintf(stderr, "\n");
+	if (ctx->verbosity > 1) {
+		for (unsigned i=0; i<w[0]; i++) {
+			fprintf(stderr, "x:%u", i);
+			for (unsigned j=0; j<n && i<w[j]; j++)
+				fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
+			fprintf(stderr, "\n");
+		}
+		for (unsigned i=0; i<h[0]; i++) {
+			fprintf(stderr, "y:%u", i);
+			for (unsigned j=0; j<n && i<h[j]; j++)
+				fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
+			fprintf(stderr, "\n");
+		}
 	}
-	for (unsigned i=0; i<h[0]; i++) {
-		fprintf(stderr, "y:%u", i);
-		for (unsigned j=0; j<n && i<h[j]; j++)
-			fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
-		fprintf(stderr, "\n");
-	}
-	for (unsigned j=0; j<n; j++) {
-		fprintf(stderr, "range_w[%u]: %u:%u\n", j, r[0][j].a, r[0][j].b);
-		fprintf(stderr, "range_h[%u]: %u:%u\n", j, r[1][j].a, r[1][j].b);
+	if (ctx->verbosity > 0) {
+		for (unsigned j=0; j<n; j++) {
+			fprintf(stderr, "range_w[%u]: %u:%u\n", j, r[0][j].a, r[0][j].b);
+			fprintf(stderr, "range_h[%u]: %u:%u\n", j, r[1][j].a, r[1][j].b);
+		}
 	}
 
 	/* seek vin back to initial ts */
@@ -953,7 +963,7 @@ static void usage(const char *progname)
   REN_OPTS...  options to slide renderer, see options '-R' and '-r' for details\n\
 \n\
 Options [defaults]:\n\
-  -C T:B:L:R   pad pixels to renderings wrt. VID; < 0 to detect [0:0:0:0]\n\
+  -C T:B:L:R   pad pixels to renderings wrt. VID; comp < 0 to detect [0:0:0:0]\n\
   -C detect    detect the cropping area based on the average intensity of slides\n\
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]\n\
                (overrides -e)\n\
@@ -1200,6 +1210,11 @@ int main(int argc, char **argv)
 	ren->destroy(ren_inst);
 
 	if (crop_detect && cropdet(&ctx, &vin, crop_detect, crop)) { /* modifies crop */
+		if (crop[0]+crop[1] >= ctx.h || crop[2]+crop[3] >= ctx.w)
+			DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
+			       "for %ux%u images\n",
+			    crop[0], crop[1], crop[2], crop[3], ctx.w, ctx.h);
+
 		optind = 1;
 		ren_inst = ren->create(argc, argv, ctx.w - crop[2] - crop[3],
 		                                   ctx.h - crop[0] - crop[1]);

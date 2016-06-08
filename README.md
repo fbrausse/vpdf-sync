@@ -47,10 +47,13 @@ Additionally, viewers like Okular (from KDE), evince (Gnome) and the like don't
 just enable use of different rendering backends (as vpdf-sync does), but also
 seem to not always adhere to the aspect ratio of the slides. E.g. Okular
 randomly full-screen renders 4:3 slides to e.g. 1021x768 pixels on a 1024x768
-monitor. This cannot be detected by vpdf-sync thus far and has to be supplied
-by the user via option '-C' if necessary. To make this task easier, options
-'-D' and '-V' provide access to the renderings and frames used for comparisons
-which allow a human to easily observe the required cropping.
+monitor. This can be detected by vpdf-sync via option '-C detect'. If cropping
+is necessary and the region is known it can be supplied by the user via option
+'-C' to save computing an additional run over all slides and video frames.
+
+Options '-D' and '-V' provide access to the renderings and frames used for the
+comparisons which allow to be used as previews in an interactive video player
+and to also let a human easily observe required cropping.
 
 ### Implementational details
 The algorithm works in 4 steps:
@@ -83,13 +86,14 @@ usage: ./vpdf-sync [-OPTS] [--] VID REN_OPTS...
   REN_OPTS...  options to slide renderer, see options '-R' and '-r' for details
 
 Options [defaults]:
-  -C T:B:L:R   pad pixels to renderings wrt. VID [0:0:0:0]
+  -C T:B:L:R   pad pixels to renderings wrt. VID; comp < 0 to detect [0:0:0:0]
+  -C detect    detect the cropping area based on the average intensity of slides
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]
                (overrides -e)
   -D DIR       dump rendered images into DIR (named PAGE-REN.ppm.gz)
   -e RDIFF_TH  interpret consecutive frames as equal if SSIM >= RDIFF + TH where
                RDIFF is computed as max SSIM from this to another rendered
-               frame and TH = (1-RDIFF)*RDIFF_TH, i.e. RDIFF_TH is the min.
+               frame and TH = (1-RDIFF)*RDIFF_TH, i.e. RDIFF_TH is the max.
                expected decrease of turbulence of VID frames wrt. RDIFF till
                which they're still not regarded as equal [0.125]
   -h           display this help message
