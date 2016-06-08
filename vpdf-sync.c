@@ -148,11 +148,12 @@ struct loc_ctx {
 	unsigned frame_cmp_nb_planes;   /* stage 1 */
 	int verbosity;                  /* stage 0 */
 	unsigned compress;              /* stage 0 */
+	int crop[4];                    /* stage 0, 2 */
 };
 
 #define LOC_CTX_INIT { \
 	-1, -1, NULL, NULL, NULL, PIMG_INIT, PIMG_INIT, NULL, -1, 0, -1, \
-	PIX_DESC_INIT, NULL, NULL, NULL, 0, 0, COMPRESS_INIT \
+	PIX_DESC_INIT, NULL, NULL, NULL, 0, 0, COMPRESS_INIT, {0,0,0,0}, \
 }
 
 static void frame_cmp(
@@ -394,6 +395,34 @@ static struct res decoded_frame(
 	return r[0];
 }
 
+static const uint8_t black[][4] = { { 0,0,0,0 }, { 0x10,0x80,0x80,0x00 }, };
+
+static void do_crop(
+	const struct loc_ctx *ctx,
+	uint8_t *const planes[static 4], const int strides[static 4]
+) {
+	int tgt_pixsteps[4];
+	const AVPixFmtDescriptor *d = ctx->pix_desc.d;
+	int is_yuv = d->nb_components < 3 || ~d->flags & AV_PIX_FMT_FLAG_RGB;
+	av_image_fill_max_pixsteps(tgt_pixsteps, NULL, d);
+
+	for (unsigned i=0; i<ctx->pix_desc.nb_planes; i++) {
+		int hsh = is_yuv && i ? d->log2_chroma_h : 0;
+		int wsh = is_yuv && i ? d->log2_chroma_w : 0;
+		uint8_t *p = planes[i];
+		for (unsigned j=0; j < -(-ctx->h >> hsh); j++, p += strides[i]) {
+			if (j < ctx->crop[0] || j >= ((ctx->h-ctx->crop[1]) >> hsh)) {
+				memset(p, black[is_yuv][i], strides[i]);
+			} else if (ctx->crop[2] > 0 || ctx->crop[3] > 0) {
+				int l = -(        -ctx->crop[2]  >> wsh) * tgt_pixsteps[i];
+				int r = ((ctx->w - ctx->crop[3]) >> wsh) * tgt_pixsteps[i];
+				memset(p    , black[is_yuv][i], l);
+				memset(p + r, black[is_yuv][i], strides[i] - r);
+			}
+		}
+	}
+}
+
 struct res_item {
 	struct res_item *next;
 	int frame_idx[2]; /* interval */
@@ -412,6 +441,7 @@ static struct res_item * run_vid_cmp(struct ff_vinput *vin, struct loc_ctx *ctx,
 		DIE(1, "error allocating AVFrame: %s\n", strerror(errno));
 
 	for (int frame_idx = 0; ff_vinput_read_frame(vin, fr[frame_idx&1], frame_idx); frame_idx++) {
+		do_crop(ctx, fr[frame_idx&1]->data, fr[frame_idx&1]->linesize);
 		r = decoded_frame(fr, frame_idx, ctx, r.page_idx,
 		                  r.page_idx < 0 ? 0 : vid_diff_ssims[r.page_idx-ctx->page_from]);
 		if (t && t->page_idx == r.page_idx) {
@@ -502,10 +532,10 @@ static struct range range_det(
 
 static int cropdet(
 	struct loc_ctx *ctx, struct ff_vinput *vin,
-	unsigned crop_detect, int crop[static 4]
+	unsigned crop_detect
 ) {
 	int crop_save[4];
-	memcpy(crop_save, crop, sizeof(crop_save));
+	memcpy(crop_save, ctx->crop, sizeof(crop_save));
 
 	/* assumption: uniformity in slides and video
 	 *        and  slides take up major spatial space in video
@@ -610,27 +640,28 @@ static int cropdet(
 
 	if (is_yuv) {
 		if (crop_detect & 1)
-			crop[0] = r[1][0].a;
-		else if (crop[0] != r[1][0].a)
-			fprintf(stderr, "crop-detect found T = %u better than given %u\n", r[1][0].a, crop[0]);
+			ctx->crop[0] = r[1][0].a;
+		else if (ctx->crop[0] != r[1][0].a)
+			fprintf(stderr, "crop-detect found T = %u better than given %u\n", r[1][0].a, ctx->crop[0]);
 		if (crop_detect & 2)
-			crop[1] = ctx->h - r[1][0].b;
-		else if (crop[1] != r[1][0].b)
-			fprintf(stderr, "crop-detect found B = %u better than given %u\n", r[1][0].b, crop[1]);
+			ctx->crop[1] = ctx->h - r[1][0].b;
+		else if (ctx->crop[1] != r[1][0].b)
+			fprintf(stderr, "crop-detect found B = %u better than given %u\n", r[1][0].b, ctx->crop[1]);
 		if (crop_detect & 4)
-			crop[2] = r[0][0].a;
-		else if (crop[2] != r[0][0].a)
-			fprintf(stderr, "crop-detect found L = %u better than given %u\n", r[0][0].a, crop[2]);
+			ctx->crop[2] = r[0][0].a;
+		else if (ctx->crop[2] != r[0][0].a)
+			fprintf(stderr, "crop-detect found L = %u better than given %u\n", r[0][0].a, ctx->crop[2]);
 		if (crop_detect & 8)
-			crop[3] = ctx->w - r[0][0].b;
-		else if (crop[3] != r[0][0].b)
-			fprintf(stderr, "crop-detect found R = %u better than given %u\n", r[0][0].b, crop[3]);
+			ctx->crop[3] = ctx->w - r[0][0].b;
+		else if (ctx->crop[3] != r[0][0].b)
+			fprintf(stderr, "crop-detect found R = %u better than given %u\n", r[0][0].b, ctx->crop[3]);
 	} else
 		DIE(1, "haven't thought about cropping non-YUV streams yet, sorry\n");
 
-	fprintf(stderr, "crop-det: %u:%u:%u:%u\n", crop[0], crop[1], crop[2], crop[3]);
+	fprintf(stderr, "crop-det: %u:%u:%u:%u\n",
+	        ctx->crop[0], ctx->crop[1], ctx->crop[2], ctx->crop[3]);
 
-	return memcmp(crop, crop_save, sizeof(crop_save)) != 0;
+	return memcmp(ctx->crop, crop_save, sizeof(crop_save)) != 0;
 }
 
 struct img_prep_args {
@@ -638,15 +669,12 @@ struct img_prep_args {
 	struct loc_ctx    *ctx;
 	const AVPixFmtDescriptor *s;
 	const AVPixFmtDescriptor *d;
-	const int         *crop;
 	int is_yuv;
 	struct timeval    *u;
 	/* for LZO compression */
 	uint8_t           *compressed_buf;
 	uint8_t           *wrkmem;
 };
-
-static const uint8_t black[][4] = { { 0,0,0,0 }, { 0x10,0x80,0x80,0x00 }, };
 
 static void vpdf_image_prepare(
 	struct vpdf_image *img, const struct img_prep_args *a,
@@ -675,29 +703,14 @@ static void vpdf_image_prepare(
 	for (unsigned i=0; i<tgt_nb_planes; i++) {
 		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
 		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
-		tgt.planes[i] +=  ( a->crop[0] >> hsh) * tgt.strides[i]
-		              +  -(-a->crop[2] >> wsh) * tgt_pixsteps[i];
+		tgt.planes[i] +=  ( a->ctx->crop[0] >> hsh) * tgt.strides[i]
+		              +  -(-a->ctx->crop[2] >> wsh) * tgt_pixsteps[i];
 	}
 
 	sws_scale(a->sws, &data, &s, 0, img->h, tgt.planes, tgt.strides);
 
 	/* TODO: do this for VID frames, too */
-	for (unsigned i=0; i<tgt_nb_planes; i++) {
-		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
-		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
-		uint8_t *p = rtgt->planes[i];
-		for (unsigned j=0; j < -(-a->ctx->h >> hsh); j++, p += rtgt->strides[i]) {
-			if (j < a->crop[0] || j >= ((a->ctx->h-a->crop[1]) >> hsh)) {
-				memset(p, black[a->is_yuv][i], rtgt->strides[i]);
-			} else if (a->crop[2] > 0 || a->crop[3] > 0) {
-				int l = -(           -a->crop[2]  >> wsh) * tgt_pixsteps[i];
-				int r = ((a->ctx->w - a->crop[3]) >> wsh) * tgt_pixsteps[i];
-				memset(p    , black[a->is_yuv][i], l);
-				memset(p + r, black[a->is_yuv][i], rtgt->strides[i] - r);
-			}
-		}
-	}
-
+	do_crop(a->ctx, rtgt->planes, rtgt->strides);
 
 	if (a->ctx->ren_dump_pat)
 		ppm_export(a->ctx->vid_sws, a->ctx->w, a->ctx->h, rtgt,
@@ -761,15 +774,13 @@ static struct SwsContext * tform_sws_context(
 	return sws_getContext(w, h, from, w, h, to, 0, NULL, NULL, NULL);
 }
 
-static void render(
-	struct loc_ctx *ctx, struct vpdf_ren *ren, void *ren_inst,
-	const int crop[static 4]
-) {
+static void render(struct loc_ctx *ctx, struct vpdf_ren *ren, void *ren_inst)
+{
 	struct img_prep_args a;
 	struct timeval u;
 
-	a.sws = tform_sws_context(ctx->w - crop[2] - crop[3],
-	                          ctx->h - crop[0] - crop[1],
+	a.sws = tform_sws_context(ctx->w - ctx->crop[2] - ctx->crop[3],
+	                          ctx->h - ctx->crop[0] - ctx->crop[1],
 	                          ren->fmt, ctx->pix_desc.pix_fmt);
 	a.ctx = ctx;
 #ifdef HAVE_LZO
@@ -778,7 +789,6 @@ static void render(
 	a.compressed_buf = ctx->compress ? compressed_buf : NULL;
 	a.wrkmem = ctx->compress ? wrkmem : NULL;
 #endif
-	a.crop = crop;
 	a.s = av_pix_fmt_desc_get(ren->fmt);
 	a.d = av_pix_fmt_desc_get(ctx->pix_desc.pix_fmt);
 	a.is_yuv = a.d->nb_components < 3 || ~a.d->flags & AV_PIX_FMT_FLAG_RGB;
@@ -1058,7 +1068,6 @@ int main(int argc, char **argv)
 	char *ren_dump_dir = NULL;
 	char *vid_dump_dir = NULL;
 	int frame_cmp_luma_only = 0;
-	int crop[4] = {0,0,0,0};
 
 	ctx.out = &outputs[OUT_HUMAN];
 	ctx.page_from = 0;
@@ -1073,15 +1082,15 @@ int main(int argc, char **argv)
 		switch (opt) {
 		case 'C':
 			if (!strcmp(optarg, "detect")) {
-				crop[0] = -1;
-				crop[1] = -1;
-				crop[2] = -1;
-				crop[3] = -1;
+				ctx.crop[0] = -1;
+				ctx.crop[1] = -1;
+				ctx.crop[2] = -1;
+				ctx.crop[3] = -1;
 				break;
 			}
 			endptr = optarg;
-			for (unsigned i=0; i<ARRAY_SIZE(crop); i++) {
-				crop[i] = strtol(endptr, &endptr, 10);
+			for (unsigned i=0; i<ARRAY_SIZE(ctx.crop); i++) {
+				ctx.crop[i] = strtol(endptr, &endptr, 10);
 				if (*endptr++ != (i == 3 ? '\0' : ':'))
 					DIE(1, "option -C expects format to be T:B:L:R\n");
 			}
@@ -1188,17 +1197,18 @@ int main(int argc, char **argv)
 	                 ren_dump_dir, vid_dump_dir);
 
 	unsigned crop_detect = 0;
-	for (unsigned i=0; i<ARRAY_SIZE(crop); i++)
-		if (crop[i] < 0) { crop_detect |= 1 << i; crop[i] = 0; }
+	for (unsigned i=0; i<ARRAY_SIZE(ctx.crop); i++)
+		if (ctx.crop[i] < 0) { crop_detect |= 1 << i; ctx.crop[i] = 0; }
 
-	if (crop[0]+crop[1] >= ctx.h || crop[2]+crop[3] >= ctx.w)
+	if (ctx.crop[0]+ctx.crop[1] >= ctx.h || ctx.crop[2]+ctx.crop[3] >= ctx.w)
 		DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
 		       "for %ux%u images\n",
-		    crop[0], crop[1], crop[2], crop[3], ctx.w, ctx.h);
+		    ctx.crop[0], ctx.crop[1], ctx.crop[2], ctx.crop[3],
+		    ctx.w, ctx.h);
 
 	struct vpdf_ren *ren = rr->r;
-	void *ren_inst = ren->create(argc, argv, ctx.w - crop[2] - crop[3],
-	                                         ctx.h - crop[0] - crop[1]);
+	void *ren_inst = ren->create(argc, argv, ctx.w - ctx.crop[2] - ctx.crop[3],
+	                                         ctx.h - ctx.crop[0] - ctx.crop[1]);
 	if (!ren_inst)
 		DIE(1, "error creating renderer '%s': check its params\n",
 		    rr->id);
@@ -1206,22 +1216,23 @@ int main(int argc, char **argv)
 	unsigned n_pages = ren->n_pages(ren_inst);
 	loc_ctx_init_ren(&ctx, &n_pages);
 
-	render(&ctx, ren, ren_inst, crop);
+	render(&ctx, ren, ren_inst);
 	ren->destroy(ren_inst);
 
-	if (crop_detect && cropdet(&ctx, &vin, crop_detect, crop)) { /* modifies crop */
-		if (crop[0]+crop[1] >= ctx.h || crop[2]+crop[3] >= ctx.w)
+	if (crop_detect && cropdet(&ctx, &vin, crop_detect)) { /* modifies crop */
+		if (ctx.crop[0]+ctx.crop[1] >= ctx.h || ctx.crop[2]+ctx.crop[3] >= ctx.w)
 			DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R) invalid "
 			       "for %ux%u images\n",
-			    crop[0], crop[1], crop[2], crop[3], ctx.w, ctx.h);
+			    ctx.crop[0], ctx.crop[1], ctx.crop[2], ctx.crop[3],
+			    ctx.w, ctx.h);
 
 		optind = 1;
-		ren_inst = ren->create(argc, argv, ctx.w - crop[2] - crop[3],
-		                                   ctx.h - crop[0] - crop[1]);
+		ren_inst = ren->create(argc, argv, ctx.w - ctx.crop[2] - ctx.crop[3],
+		                                   ctx.h - ctx.crop[0] - ctx.crop[1]);
 		if (!ren_inst)
 			DIE(1, "error creating renderer '%s': check its params\n",
 			    rr->id);
-		render(&ctx, ren, ren_inst, crop);
+		render(&ctx, ren, ren_inst);
 		ren->destroy(ren_inst);
 	}
 
