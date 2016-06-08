@@ -526,18 +526,16 @@ static int cropdet(
 		frames[1][j] = calloc(h[j], sizeof(uint32_t));
 	}
 
+	uint32_t vx[w[0]], vy[h[0]];
 	plane_add_f *plane_add = PLANE_ADD_IMPL;
 	for (int i=ctx->page_from; i<ctx->page_to; i++) {
-		frame_render(ctx, i, &ctx->tmp, &ctx->tmp_page_idx);
+		const struct pimg *img = frame_render(ctx, i, &ctx->tmp, &ctx->tmp_page_idx);
 		for (unsigned j=0; j<n; j++) {
-			plane_add(slides[0][j], slides[1][j], ctx->tmp.planes[j],
-			          w[j], h[j], ctx->tmp.strides[j]);
-			unsigned *s0 = slides[0][j];
+			plane_add(vx, vy, img->planes[j], w[j], h[j], img->strides[j]);
 			for (unsigned k=0; k<w[j]; k++)
-				*s0 = (*s0 + h[j]/2) / h[j];
-			unsigned *s1 = slides[1][j];
+				slides[0][j][k] += (vx[k] + h[j]/2-1) / h[j];
 			for (unsigned k=0; k<h[j]; k++)
-				*s1 = (*s1 + w[j]/2) / w[j];
+				slides[1][j][k] += (vy[k] + w[j]/2-1) / w[j];
 		}
 	}
 
@@ -548,14 +546,11 @@ static int cropdet(
 		if (frame_idx == 0 && (ts = fr->pts) == AV_NOPTS_VALUE)
 			ts = fr->pkt_pts;
 		for (unsigned j=0; j<n; j++) {
-			plane_add(frames[0][j], slides[1][j], fr->data[j],
-			          w[j], h[j], fr->linesize[j]);
-			unsigned *f0 = frames[0][j];
-			for (unsigned k=0; k<w[j]; k++, f0++)
-				*f0 = (*f0 + h[j]/2) / h[j];
-			unsigned *f1 = frames[1][j];
+			plane_add(vx, vy, fr->data[j], w[j], h[j], fr->linesize[j]);
+			for (unsigned k=0; k<w[j]; k++)
+				frames[0][j][k] += (vx[k] + h[j]/2-1) / h[j];
 			for (unsigned k=0; k<h[j]; k++)
-				*f1 = (*f1 + w[j]/2) / w[j];
+				frames[1][j][k] += (vy[k] + w[j]/2-1) / w[j];
 		}
 	}
 	av_frame_free(&fr);
@@ -574,10 +569,28 @@ static int cropdet(
 		r[1][j] = range_det(h[j], frames[1][j], slides[1][j][0], slides[1][j][h[j]-1], 8);
 	}
 
+	for (unsigned i=0; i<w[0]; i++) {
+		fprintf(stderr, "x:%u", i);
+		for (unsigned j=0; j<n && i<w[j]; j++)
+			fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
+		fprintf(stderr, "\n");
+	}
+	for (unsigned i=0; i<h[0]; i++) {
+		fprintf(stderr, "y:%u", i);
+		for (unsigned j=0; j<n && i<h[j]; j++)
+			fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
+		fprintf(stderr, "\n");
+	}
+	for (unsigned j=0; j<n; j++) {
+		fprintf(stderr, "range_w[%u]: %u:%u\n", j, r[0][j].a, r[0][j].b);
+		fprintf(stderr, "range_h[%u]: %u:%u\n", j, r[1][j].a, r[1][j].b);
+	}
+
 	/* seek vin back to initial ts */
 	int ret = av_seek_frame(vin->fmt_ctx, vin->vid_stream_idx, ts, AVSEEK_FLAG_BACKWARD);
 	if (ret < 0)
 		DIE(1, "error rewinding VID stream: %s\n", fferror(ret));
+	vin->end_of_stream = 0;
 
 	for (unsigned j=0; j<n; j++)
 		for (unsigned k=0; k<2; k++) {
@@ -604,6 +617,8 @@ static int cropdet(
 			fprintf(stderr, "crop-detect found R = %u better than given %u\n", r[0][0].b, crop[3]);
 	} else
 		DIE(1, "haven't thought about cropping non-YUV streams yet, sorry\n");
+
+	fprintf(stderr, "crop-det: %u:%u:%u:%u\n", crop[0], crop[1], crop[2], crop[3]);
 
 	return memcmp(crop, crop_save, sizeof(crop_save)) != 0;
 }

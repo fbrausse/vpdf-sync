@@ -2,6 +2,7 @@
 #include "unicode-convert.h"
 
 #include <langinfo.h>		/* nl_langinfo(3) */
+#include <locale.h>
 #include <string.h>		/* strstr(3), memset(3) */
 
 int utf8_to_ucs4(const char *utf8, size_t ulen, uint32_t *r)
@@ -103,8 +104,12 @@ char * utf8tomb(const char *utf8, size_t ulen)
 int env_is_utf8(void)
 {
 	char *codeset = nl_langinfo(CODESET);
-	if (!strstr(codeset, "UTF-8") || !strstr(codeset, "utf8"))
-		return 1;
-	return 0;
+	if (!codeset || !*codeset)
+		codeset = setlocale(LC_CTYPE, NULL);
+	if (!codeset || !*codeset)
+		codeset = setlocale(LC_ALL, NULL);
+	if (!codeset || !*codeset)
+		return 0;
+	return !strstr(codeset, "UTF-8") || !strstr(codeset, "utf8");
 }
 
