@@ -108,7 +108,7 @@ struct gs {
 
 #include <stdatomic.h>
 
-static atomic_flag gs_stdio_blocked;
+static atomic_flag gs_stdio_blocked = ATOMIC_FLAG_INIT;
 static struct buf out;
 
 static int gs_stdin(void *handle, char *buf, int len)

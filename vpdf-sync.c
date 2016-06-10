@@ -26,7 +26,7 @@
 # define PLANE_CMP2_EXTRA_FLAGS		0
 #endif
 
-#define VPDF_SYNC_CROPDET_FRAC		0x1p-8	/* sth like 4% */
+#define VPDF_SYNC_CROPDET_FRAC		0x1p-8	/* sth like .4% */
 
 C_NAMESPACE_BEGIN
 
@@ -530,6 +530,58 @@ static struct range range_det(
 	return r;
 }
 
+struct plane {
+	struct plane_data {
+		uint32_t *x, *y;
+	} slide, frame;
+	unsigned w, h;
+	struct range rx, ry;
+};
+
+static void plane_add0(
+	plane_add_f *plane_add, const struct plane_data *d,
+	unsigned w, unsigned h,
+	const uint8_t *data, const unsigned stride
+) {
+	uint32_t vx[w], vy[h];
+	plane_add(vx, vy, data, w, h, stride);
+	for (unsigned k=0; k<w; k++)
+		d->x[k] += (vx[k] + h/2-1) / h;
+	for (unsigned k=0; k<h; k++)
+		d->y[k] += (vy[k] + w/2-1) / w;
+}
+
+static void plane_fini(
+	struct plane *p, unsigned n_slides, unsigned n_frames
+) {
+	for (int i=0; i<p->w; i++) {
+		p->slide.x[i] /= n_slides;
+		p->frame.x[i] /= n_frames;
+	}
+	for (int i=0; i<p->h; i++) {
+		p->slide.y[i] /= n_slides;
+		p->frame.y[i] /= n_frames;
+	}
+
+	struct {
+		uint32_t a, b;
+	} x = { 0, 0 }, y = { 0, 0 };
+
+	unsigned nx = ceil(VPDF_SYNC_CROPDET_FRAC*p->w);
+	for (unsigned i=0; i<nx; i++) {
+		x.a += p->slide.x[i];
+		x.b += p->slide.x[p->w-1-i];
+	}
+	unsigned ny = ceil(VPDF_SYNC_CROPDET_FRAC*p->h);
+	for (unsigned i=0; i<ny; i++) {
+		y.a += p->slide.y[i];
+		y.b += p->slide.y[p->h-1-i];
+	}
+
+	p->rx = range_det(p->w, p->frame.x, (x.a + nx/2-1) / nx, (x.b + nx/2-1) / nx, 8);
+	p->ry = range_det(p->h, p->frame.y, (y.a + ny/2-1) / ny, (y.b + ny/2-1) / ny, 8);
+}
+
 static int cropdet(
 	struct loc_ctx *ctx, struct ff_vinput *vin,
 	unsigned crop_detect
@@ -545,28 +597,24 @@ static int cropdet(
 	unsigned n = ctx->pix_desc.nb_planes;
 	int is_yuv = n < 3 || ~ctx->pix_desc.d->flags & AV_PIX_FMT_FLAG_RGB;
 
-	uint32_t *slides[2][n], *frames[2][n];
-	unsigned w[n], h[n];
+	struct plane v[n];
+
 	for (unsigned j=0; j<n; j++) {
-		w[j] = ctx->w >> (is_yuv && j ? ctx->pix_desc.d->log2_chroma_w : 0);
-		h[j] = ctx->h >> (is_yuv && j ? ctx->pix_desc.d->log2_chroma_h : 0);
-		slides[0][j] = calloc(w[j], sizeof(uint32_t));
-		slides[1][j] = calloc(h[j], sizeof(uint32_t));
-		frames[0][j] = calloc(w[j], sizeof(uint32_t));
-		frames[1][j] = calloc(h[j], sizeof(uint32_t));
+		struct plane *p = v+j;
+		p->w = ctx->w >> (is_yuv && j ? ctx->pix_desc.d->log2_chroma_w : 0);
+		p->h = ctx->h >> (is_yuv && j ? ctx->pix_desc.d->log2_chroma_h : 0);
+		p->slide.x = calloc(p->w, sizeof(uint32_t));
+		p->slide.y = calloc(p->h, sizeof(uint32_t));
+		p->frame.x = calloc(p->w, sizeof(uint32_t));
+		p->frame.y = calloc(p->h, sizeof(uint32_t));
 	}
 
-	uint32_t vx[w[0]], vy[h[0]];
 	plane_add_f *plane_add = PLANE_ADD_IMPL;
 	for (int i=ctx->page_from; i<ctx->page_to; i++) {
 		const struct pimg *img = frame_render(ctx, i, &ctx->tmp, &ctx->tmp_page_idx);
-		for (unsigned j=0; j<n; j++) {
-			plane_add(vx, vy, img->planes[j], w[j], h[j], img->strides[j]);
-			for (unsigned k=0; k<w[j]; k++)
-				slides[0][j][k] += (vx[k] + h[j]/2-1) / h[j];
-			for (unsigned k=0; k<h[j]; k++)
-				slides[1][j][k] += (vy[k] + w[j]/2-1) / w[j];
-		}
+		const struct plane *p = v;
+		for (unsigned j=0; j<n; j++, p++)
+			plane_add0(plane_add, &p->slide, p->w, p->h, img->planes[j], img->strides[j]);
 	}
 
 	AVFrame *fr = av_frame_alloc();
@@ -579,50 +627,36 @@ static int cropdet(
 			fprintf(stderr, "averaging video frames: %u\r", frame_idx);
 			fflush(stderr);
 		}
-		for (unsigned j=0; j<n; j++) {
-			plane_add(vx, vy, fr->data[j], w[j], h[j], fr->linesize[j]);
-			for (unsigned k=0; k<w[j]; k++)
-				frames[0][j][k] += (vx[k] + h[j]/2-1) / h[j];
-			for (unsigned k=0; k<h[j]; k++)
-				frames[1][j][k] += (vy[k] + w[j]/2-1) / w[j];
-		}
+		const struct plane *p = v;
+		for (unsigned j=0; j<n; j++, p++)
+			plane_add0(plane_add, &p->frame, p->w, p->h, fr->data[j], fr->linesize[j]);
 	}
 	if (ctx->verbosity > 0)
 		fprintf(stderr, "\n");
 	av_frame_free(&fr);
 
-	struct range r[2][n];
-	for (unsigned j=0; j<n; j++) {
-		for (int i=0; i<w[j]; i++) {
-			slides[0][j][i] /= ctx->page_to - ctx->page_from;
-			frames[0][j][i] /= frame_idx;
-		}
-		for (int i=0; i<h[j]; i++) {
-			slides[1][j][i] /= ctx->page_to - ctx->page_from;
-			frames[1][j][i] /= frame_idx;
-		}
-		r[0][j] = range_det(w[j], frames[0][j], slides[0][j][0], slides[0][j][w[j]-1], 8);
-		r[1][j] = range_det(h[j], frames[1][j], slides[1][j][0], slides[1][j][h[j]-1], 8);
-	}
+	for (unsigned j=0; j<n; j++)
+		plane_fini(&v[j], ctx->page_to - ctx->page_from, frame_idx);
 
 	if (ctx->verbosity > 1) {
-		for (unsigned i=0; i<w[0]; i++) {
+		for (unsigned i=0; i<v[0].w; i++) {
 			fprintf(stderr, "x:%u", i);
-			for (unsigned j=0; j<n && i<w[j]; j++)
-				fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
+			for (unsigned j=0; j<n && i<v[j].w; j++)
+				fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, v[j].frame.x[i], j, v[j].slide.x[i]);
 			fprintf(stderr, "\n");
 		}
-		for (unsigned i=0; i<h[0]; i++) {
+		for (unsigned i=0; i<v[0].h; i++) {
 			fprintf(stderr, "y:%u", i);
-			for (unsigned j=0; j<n && i<h[j]; j++)
-				fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, frames[0][j][i], j, slides[0][j][i]);
+			for (unsigned j=0; j<n && i<v[j].h; j++)
+				fprintf(stderr, "\tf[%u]:%u\ts[%u]:%u", j, v[j].frame.y[i], j, v[j].slide.y[i]);
 			fprintf(stderr, "\n");
 		}
 	}
 	if (ctx->verbosity > 0) {
-		for (unsigned j=0; j<n; j++) {
-			fprintf(stderr, "range_w[%u]: %u:%u\n", j, r[0][j].a, r[0][j].b);
-			fprintf(stderr, "range_h[%u]: %u:%u\n", j, r[1][j].a, r[1][j].b);
+		const struct plane *p = v;
+		for (unsigned j=0; j<n; j++, p++) {
+			fprintf(stderr, "range_w[%u]: %u:%u\n", j, p->rx.a, p->rx.b);
+			fprintf(stderr, "range_h[%u]: %u:%u\n", j, p->ry.a, p->ry.b);
 		}
 	}
 
@@ -632,29 +666,26 @@ static int cropdet(
 		DIE(1, "error rewinding VID stream: %s\n", fferror(ret));
 	vin->end_of_stream = 0;
 
-	for (unsigned j=0; j<n; j++)
-		for (unsigned k=0; k<2; k++) {
-			free(slides[k][j]);
-			free(frames[k][j]);
-		}
+	for (unsigned j=0; j<n; j++) {
+		const struct plane *p = v+j;
+		free(p->slide.x);
+		free(p->slide.y);
+		free(p->frame.x);
+		free(p->frame.y);
+	}
 
 	if (is_yuv) {
-		if (crop_detect & 1)
-			ctx->crop[0] = r[1][0].a;
-		else if (ctx->crop[0] != r[1][0].a)
-			fprintf(stderr, "crop-detect found T = %u better than given %u\n", r[1][0].a, ctx->crop[0]);
-		if (crop_detect & 2)
-			ctx->crop[1] = ctx->h - r[1][0].b;
-		else if (ctx->crop[1] != r[1][0].b)
-			fprintf(stderr, "crop-detect found B = %u better than given %u\n", r[1][0].b, ctx->crop[1]);
-		if (crop_detect & 4)
-			ctx->crop[2] = r[0][0].a;
-		else if (ctx->crop[2] != r[0][0].a)
-			fprintf(stderr, "crop-detect found L = %u better than given %u\n", r[0][0].a, ctx->crop[2]);
-		if (crop_detect & 8)
-			ctx->crop[3] = ctx->w - r[0][0].b;
-		else if (ctx->crop[3] != r[0][0].b)
-			fprintf(stderr, "crop-detect found R = %u better than given %u\n", r[0][0].b, ctx->crop[3]);
+		const struct range *rx = &v[0].rx, *ry = &v[0].ry;
+		const unsigned ncrop[4] = {
+			ry->a, ctx->h - ry->b,
+			rx->a, ctx->w - rx->b,
+		};
+		for (unsigned i=0; i<4; i++)
+			if (crop_detect & (1U << i))
+				ctx->crop[i] = ncrop[i];
+			else if (ctx->crop[i] != ncrop[i])
+				fprintf(stderr, "crop-detect found %c = %u better than given %u\n",
+				        "TBLR"[i], ncrop[i], ctx->crop[i]);
 	} else
 		DIE(1, "haven't thought about cropping non-YUV streams yet, sorry\n");
 
@@ -690,7 +721,7 @@ static void vpdf_image_prepare(
 	struct timeval v;
 	if (a->ctx->verbosity > 0) {
 		gettimeofday(&v, NULL);
-		fprintf(stderr, "rendered page %4d+%4d/%4d (%s) in %5.1f ms",
+		fprintf(stderr, "rendered page %4d+%4d/%4d (%3s) in %5.1f ms",
 		        a->ctx->page_from+1, page_idx-a->ctx->page_from,
 		        a->ctx->page_to - a->ctx->page_from, label,
 		        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
