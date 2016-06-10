@@ -98,7 +98,7 @@ Options [defaults]:
                which they're still not regarded as equal [0.125]
   -h           display this help message
   -j           format output as JSON records [human readable single line]
-  -L           display list of compiles/linked libraries
+  -L           display list of compiled/linked libraries
   -p FROM:TO   interval of pages to render (1-based, inclusive, each),
                FROM and TO can both be empty [1:page-num]
   -r REN       use REN to render PDF [poppler-cairo]

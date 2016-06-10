@@ -71,6 +71,7 @@ struct pix_desc {
 };
 
 #define PIX_DESC_INIT	{ NULL, 0, 0, }
+#define IS_YUV(d)	((d)->nb_components < 3 || ~(d)->flags & AV_PIX_FMT_FLAG_RGB)
 
 static unsigned pix_fmt_nb_planes(const AVPixFmtDescriptor *d)
 {
@@ -402,11 +403,12 @@ static void do_crop(
 	uint8_t *const planes[static 4], const int strides[static 4]
 ) {
 	int tgt_pixsteps[4];
-	const AVPixFmtDescriptor *d = ctx->pix_desc.d;
-	int is_yuv = d->nb_components < 3 || ~d->flags & AV_PIX_FMT_FLAG_RGB;
+	const struct pix_desc *desc = &ctx->pix_desc;
+	const AVPixFmtDescriptor *d = desc->d;
+	int is_yuv = IS_YUV(d);
 	av_image_fill_max_pixsteps(tgt_pixsteps, NULL, d);
 
-	for (unsigned i=0; i<ctx->pix_desc.nb_planes; i++) {
+	for (unsigned i=0; i<desc->nb_planes; i++) {
 		int hsh = is_yuv && i ? d->log2_chroma_h : 0;
 		int wsh = is_yuv && i ? d->log2_chroma_w : 0;
 		uint8_t *p = planes[i];
@@ -595,7 +597,7 @@ static int cropdet(
 	 *             borders average intensity/color */
 
 	unsigned n = ctx->pix_desc.nb_planes;
-	int is_yuv = n < 3 || ~ctx->pix_desc.d->flags & AV_PIX_FMT_FLAG_RGB;
+	int is_yuv = IS_YUV(ctx->pix_desc.d);
 
 	struct plane v[n];
 
@@ -699,8 +701,6 @@ struct img_prep_args {
 	struct SwsContext *sws;
 	struct loc_ctx    *ctx;
 	const AVPixFmtDescriptor *s;
-	const AVPixFmtDescriptor *d;
-	int is_yuv;
 	struct timeval    *u;
 	/* for LZO compression */
 	uint8_t           *compressed_buf;
@@ -713,47 +713,51 @@ static void vpdf_image_prepare(
 ) {
 	int s = img->s;
 	const uint8_t *data = img->data;
+	struct loc_ctx *ctx = a->ctx;
 
-	unsigned tgt_nb_planes = pix_fmt_nb_planes(a->d);
+	const AVPixFmtDescriptor *tgt_fmt = ctx->pix_desc.d;
+	unsigned tgt_nb_planes = ctx->pix_desc.nb_planes;
+	int is_yuv = IS_YUV(tgt_fmt);
 	int tgt_pixsteps[4];
-	av_image_fill_max_pixsteps(tgt_pixsteps, NULL, a->d);
+	av_image_fill_max_pixsteps(tgt_pixsteps, NULL, tgt_fmt);
 
 	struct timeval v;
 	if (a->ctx->verbosity > 0) {
 		gettimeofday(&v, NULL);
 		fprintf(stderr, "rendered page %4d+%4d/%4d (%3s) in %5.1f ms",
-		        a->ctx->page_from+1, page_idx-a->ctx->page_from,
-		        a->ctx->page_to - a->ctx->page_from, label,
+		        ctx->page_from+1, page_idx-ctx->page_from,
+		        ctx->page_to - ctx->page_from, label,
 		        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
 		*a->u = v;
 	}
 
-	struct pimg *rtgt = a->ctx->compress ? &a->ctx->tmp
-	                                     : a->ctx->pbuf+(page_idx-a->ctx->page_from);
+	struct pimg *rtgt = ctx->compress ? &ctx->tmp
+	                                  : ctx->pbuf+(page_idx-ctx->page_from);
 	struct pimg tgt = *rtgt;
 	for (unsigned i=0; i<tgt_nb_planes; i++) {
-		int hsh = a->is_yuv && i ? a->d->log2_chroma_h : 0;
-		int wsh = a->is_yuv && i ? a->d->log2_chroma_w : 0;
-		tgt.planes[i] +=  ( a->ctx->crop[0] >> hsh) * tgt.strides[i]
-		              +  -(-a->ctx->crop[2] >> wsh) * tgt_pixsteps[i];
+		int hsh = is_yuv && i ? tgt_fmt->log2_chroma_h : 0;
+		int wsh = is_yuv && i ? tgt_fmt->log2_chroma_w : 0;
+		tgt.planes[i] +=  ( ctx->crop[0] >> hsh) * tgt.strides[i]
+		              +  -(-ctx->crop[2] >> wsh) * tgt_pixsteps[i];
 	}
 
 	sws_scale(a->sws, &data, &s, 0, img->h, tgt.planes, tgt.strides);
 
-	/* TODO: do this for VID frames, too */
-	do_crop(a->ctx, rtgt->planes, rtgt->strides);
+	do_crop(ctx, rtgt->planes, rtgt->strides);
 
-	if (a->ctx->ren_dump_pat)
-		ppm_export(a->ctx->vid_sws, a->ctx->w, a->ctx->h, rtgt,
-		           &a->ctx->vid_ppm, a->ctx->ren_dump_pat, page_idx+1); /* TODO: -f is 1-based */
+	if (ctx->ren_dump_pat)
+		ppm_export(ctx->vid_sws, ctx->w, ctx->h, rtgt,
+		           &ctx->vid_ppm, ctx->ren_dump_pat, page_idx+1);
 
-	if (a->ctx->verbosity > 0) {
+	if (ctx->verbosity > 0) {
 		gettimeofday(&v, NULL);
-		fprintf(stderr, ", tform %s -> %s in %4.1f ms", a->s->name, a->d->name,
-		        (v.tv_sec-a->u->tv_sec)*1e3+(v.tv_usec-a->u->tv_usec)*1e-3);
+		fprintf(stderr, ", tform %s -> %s in %4.1f ms",
+		        a->s->name, tgt_fmt->name,
+		         (v.tv_sec -a->u->tv_sec )*1e3
+		        +(v.tv_usec-a->u->tv_usec)*1e-3);
 	}
 
-	if (a->ctx->compress) {
+	if (ctx->compress) {
 #ifdef HAVE_LZO
 		/* LZO compress */
 		unsigned long kj[4];
@@ -761,39 +765,42 @@ static void vpdf_image_prepare(
 		unsigned sz = 0;
 		*a->u = v;
 		for (unsigned j=0; j<tgt_nb_planes; j++) {
-			unsigned ph  = -(-a->ctx->h >> (a->is_yuv && j ? a->d->log2_chroma_h : 0));
-			unsigned psz = ph * a->ctx->tmp.strides[j];
+			unsigned ph  = -(-ctx->h >> (is_yuv && j ? tgt_fmt->log2_chroma_h : 0));
+			unsigned psz = ph * ctx->tmp.strides[j];
 			unsigned long osz;
 			sz += psz;
-			lzo1x_1_15_compress(a->ctx->tmp.planes[j], psz,
-					    a->compressed_buf+k, kj+j, a->wrkmem);
+			lzo1x_1_15_compress(ctx->tmp.planes[j], psz,
+			                    a->compressed_buf+k, kj+j,
+			                    a->wrkmem);
 			lzo1x_optimize(a->compressed_buf+k, kj[j],
-				       a->ctx->tmp.planes[j], &osz, NULL);
+			               ctx->tmp.planes[j], &osz, NULL);
 			k += kj[j];
 		}
-		if (a->ctx->verbosity > 0) {
+		if (ctx->verbosity > 0) {
 			gettimeofday(&v, NULL);
-			fprintf(stderr, ", compressed in %4.0f us: %u -> %*u bytes (%5.1f%%)",
-			        (v.tv_sec-a->u->tv_sec)*1e6+(v.tv_usec-a->u->tv_usec),
+			fprintf(stderr, ", compressed in %4.0f us: %u"
+			                " -> %*u bytes (%5.1f%%)",
+			        (v.tv_sec-a->u->tv_sec)*1e6
+			        +(v.tv_usec-a->u->tv_usec),
 			        sz, snprintf(NULL, 0, "%u", sz), k, 100.0*k/sz);
 		}
-		struct cimg *c = malloc(offsetof(struct cimg,data)+k);
+		struct cimg *c = malloc(offsetof(struct cimg,data) + k);
 		for (unsigned j=0; j<tgt_nb_planes; j++)
 			c->lens[j] = kj[j];
 		memcpy(c->data, a->compressed_buf, k);
-		struct cimg **cimg_ptr = &a->ctx->buf[page_idx - a->ctx->page_from];
+		struct cimg **cimg_ptr = &a->ctx->buf[page_idx - ctx->page_from];
 		if (*cimg_ptr)
 			free(*cimg_ptr);
 		*cimg_ptr = c;
 #endif
 	}
 
-	char **lbl_ptr = &a->ctx->labels[page_idx - a->ctx->page_from];
+	char **lbl_ptr = &ctx->labels[page_idx - ctx->page_from];
 	if (*lbl_ptr)
 		free(*lbl_ptr);
 	*lbl_ptr = label;
 
-	if (a->ctx->verbosity > 0) {
+	if (ctx->verbosity > 0) {
 		fprintf(stderr, "\n");
 		gettimeofday(a->u, NULL);
 	}
@@ -809,6 +816,7 @@ static void render(struct loc_ctx *ctx, struct vpdf_ren *ren, void *ren_inst)
 {
 	struct img_prep_args a;
 	struct timeval u;
+	const AVPixFmtDescriptor *tgt_fmt = ctx->pix_desc.d;
 
 	a.sws = tform_sws_context(ctx->w - ctx->crop[2] - ctx->crop[3],
 	                          ctx->h - ctx->crop[0] - ctx->crop[1],
@@ -821,17 +829,18 @@ static void render(struct loc_ctx *ctx, struct vpdf_ren *ren, void *ren_inst)
 	a.wrkmem = ctx->compress ? wrkmem : NULL;
 #endif
 	a.s = av_pix_fmt_desc_get(ren->fmt);
-	a.d = av_pix_fmt_desc_get(ctx->pix_desc.pix_fmt);
-	a.is_yuv = a.d->nb_components < 3 || ~a.d->flags & AV_PIX_FMT_FLAG_RGB;
 	a.u = &u;
 
-	if (a.d->flags & AV_PIX_FMT_FLAG_PAL)
-		DIE(1, "error: VID's pix_fmt '%s' is palettized, that's unsupported\n", a.d->name);
-	if (a.d->flags & AV_PIX_FMT_FLAG_BITSTREAM)
-		DIE(1, "error: VID's pix_fmt '%s' is a bitstream, that's unsupported\n", a.d->name);
+	if (tgt_fmt->flags & AV_PIX_FMT_FLAG_PAL)
+		DIE(1, "error: VID's pix_fmt '%s' is palettized,"
+		       " that's unsupported\n", tgt_fmt->name);
+	if (tgt_fmt->flags & AV_PIX_FMT_FLAG_BITSTREAM)
+		DIE(1, "error: VID's pix_fmt '%s' is a bitstream,"
+		       " that's unsupported\n", tgt_fmt->name);
 
 	gettimeofday(a.u, NULL);
-	ren->render(ren_inst, ctx->page_from, ctx->page_to, vpdf_image_prepare, &a);
+	ren->render(ren_inst, ctx->page_from, ctx->page_to,
+	            vpdf_image_prepare, &a);
 
 	sws_freeContext(a.sws);
 }
