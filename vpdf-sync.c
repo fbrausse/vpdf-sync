@@ -1033,6 +1033,21 @@ static const struct renderer * renderer_find_working(const char *ren_id)
 	return rr;
 }
 
+#ifdef HAVE_GS
+# define LICENSE_REQ_AGLPv3
+#endif
+#if defined(HAVE_POPPLER_GLIB) || defined(HAVE_POPPLER_CPP) || defined(HAVE_LZO)
+# define LICENSE_REQ_GPLv2_PLUS
+#endif
+
+#define LICENSE_CODE	"GPLv2+"
+
+#if defined(LICENSE_REQ_AGLPv3)
+# define LICENSE	"AGPLv3"
+#else
+# define LICENSE	LICENSE_CODE
+#endif
+
 static void usage(const char *progname)
 {
 	printf("usage: %s [-OPTS] [--] VID REN_OPTS...\n", progname);
@@ -1081,7 +1096,7 @@ Classification of match certainty:\n\
 ",
 	       VPDF_SYNC_SSIM_EXACT, VPDF_SYNC_SSIM_VAGUE);
 	printf("\n\
-Author: Franz Brausse <dev@karlchenofhell.org>, code licensed under GPLv2.\n\
+Author: Franz Brausse <dev@karlchenofhell.org>; vpdf-sync licensed under " LICENSE ".\n\
 ");
 }
 

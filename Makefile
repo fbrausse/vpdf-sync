@@ -49,11 +49,11 @@
 #                   rendered frames (by any backend)
 ###############################################################################
 OPTS :=
-OPTS += poppler-cairo
-OPTS += poppler-splash
-OPTS += ghostscript
+OPTS += poppler-cairo	# license: GPLv2+
+OPTS += poppler-splash	# license: GPLv2+
+OPTS += ghostscript	# license: AGPLv3
 OPTS += zlib
-OPTS += lzo
+OPTS += lzo		# license: GPLv2+
 OPTS += openmp
 
 
