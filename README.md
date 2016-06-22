@@ -86,6 +86,8 @@ usage: ./vpdf-sync [-OPTS] [--] VID REN_OPTS...
   REN_OPTS...  options to slide renderer, see options '-R' and '-r' for details
 
 Options [defaults]:
+  -c X:Y       set cut-off thresholds of abs-diff luma components of averaged
+               slides and frames for crop-detection, either can be empty [32:32]
   -C T:B:L:R   pad pixels to renderings wrt. VID; comp < 0 to detect [0:0:0:0]
   -C detect    detect the cropping area based on the average intensity of slides
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]
@@ -103,7 +105,7 @@ Options [defaults]:
                FROM and TO can both be empty [1:page-num]
   -r REN       use REN to render PDF [poppler-cairo]
   -R           display usage information for all supported renderers
-  -u           don't compress pages (watch out for OOM) [compress]
+  -u           don't compress pages (watch out for OOM) [LZO-compress]
   -v           increase verbosity
   -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM.ppm.gz)
   -y           toggle compare luma plane only [YUV]
@@ -113,7 +115,7 @@ Classification of match certainty:
   'vague' when SSIM <  0.4  (most probably no match found in page range),
   'fuzzy' otherwise         (match unclear, try adjusting '-C')
 
-Author: Franz Brausse <dev@karlchenofhell.org>, code licensed under GPLv2.
+Author: Franz Brausse <dev@karlchenofhell.org>; vpdf-sync licensed under AGPLv3.
 ```
 
 ```

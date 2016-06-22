@@ -27,6 +27,9 @@
 #endif
 
 #define VPDF_SYNC_CROPDET_FRAC		0x1p-8	/* sth like .4% */
+#define VPDF_SYNC_CROPDET_THRESH	32 /* pix-value diff cut-off */
+#define VPDF_SYNC_CROPDET_XTHRESH	VPDF_SYNC_CROPDET_THRESH
+#define VPDF_SYNC_CROPDET_YTHRESH	VPDF_SYNC_CROPDET_THRESH
 
 C_NAMESPACE_BEGIN
 
@@ -566,7 +569,8 @@ static void plane_add0(
 }
 
 static void plane_fini(
-	struct plane *p, unsigned n_slides, unsigned n_frames
+	struct plane *p, unsigned n_slides, unsigned n_frames,
+	unsigned xthresh, unsigned ythresh
 ) {
 	for (int i=0; i<p->w; i++) {
 		p->slide.x[i] /= n_slides;
@@ -593,14 +597,14 @@ static void plane_fini(
 	}
 
 	p->rx = range_det(p->w, p->frame.x, (x.a + nx/2-1) / nx,
-	                                    (x.b + nx/2-1) / nx, 8);
+	                                    (x.b + nx/2-1) / nx, xthresh);
 	p->ry = range_det(p->h, p->frame.y, (y.a + ny/2-1) / ny,
-	                                    (y.b + ny/2-1) / ny, 8);
+	                                    (y.b + ny/2-1) / ny, ythresh);
 }
 
 static int cropdet(
 	struct loc_ctx *ctx, struct ff_vinput *vin,
-	unsigned crop_detect
+	unsigned crop_detect, unsigned xthresh, unsigned ythresh
 ) {
 	int crop_save[4];
 	memcpy(crop_save, ctx->crop, sizeof(crop_save));
@@ -657,7 +661,8 @@ static int cropdet(
 	av_frame_free(&fr);
 
 	for (unsigned j=0; j<n; j++)
-		plane_fini(&v[j], ctx->page_to - ctx->page_from, frame_idx);
+		plane_fini(&v[j], ctx->page_to - ctx->page_from, frame_idx,
+		           xthresh, ythresh);
 
 	if (ctx->verbosity > 1) {
 		for (unsigned i=0; i<v[0].w; i++) {
@@ -1057,6 +1062,8 @@ static void usage(const char *progname)
   REN_OPTS...  options to slide renderer, see options '-R' and '-r' for details\n\
 \n\
 Options [defaults]:\n\
+  -c X:Y       set cut-off thresholds of abs-diff luma components of averaged\n\
+               slides and frames for crop-detection, either can be empty [%u:%u]\n\
   -C T:B:L:R   pad pixels to renderings wrt. VID; comp < 0 to detect [0:0:0:0]\n\
   -C detect    detect the cropping area based on the average intensity of slides\n\
   -d VID_DIFF  interpret consecutive frames as equal if SSIM >= VID_DIFF [unset]\n\
@@ -1069,7 +1076,7 @@ Options [defaults]:\n\
                which they're still not regarded as equal [%g]\n\
   -h           display this help message\n\
   -j           format output as JSON records [human readable single line]\n\
-  -L           display list of compiles/linked libraries\n\
+  -L           display list of compiled/linked libraries\n\
   -p FROM:TO   interval of pages to render (1-based, inclusive, each),\n\
                FROM and TO can both be empty [1:page-num]\n\
   -r REN       use REN to render PDF [%s]\n\
@@ -1079,6 +1086,7 @@ Options [defaults]:\n\
   -V DIR       dump located frames into DIR (named PAGE-FRAME-SSIM" PPM_SUFFIX ")\n\
   -y           toggle compare luma plane only [YUV]\n\
 ",
+	       VPDF_SYNC_CROPDET_THRESH, VPDF_SYNC_CROPDET_YTHRESH,
 	       VPDF_SYNC_RDIFF_TH,
 	       ARRAY_SIZE(renderers) ? renderers[0].id : "(unsupported)",
 #ifdef HAVE_LZO
@@ -1143,6 +1151,21 @@ static void libs(void)
 	        v >> 16, (v >> 8) & 0xff, v & 0xff);
 }
 
+static void opt_parse_cdet_th(unsigned *xthresh, unsigned *ythresh)
+{
+	char *endptr = optarg;
+	unsigned *p[] = { xthresh, ythresh, };
+	for (unsigned i=0; i<ARRAY_SIZE(p); i++) {
+		char *s = endptr;
+		long v = strtol(s, &endptr, 0);
+		if (*endptr != (i+1 < ARRAY_SIZE(p) ? ':' : '\0') || v < 0)
+			DIE(1, "expected format X:Y for non-negative integers "
+			       "X, Y for option '-c'\n");
+		if (endptr++ != s)
+			*p[i] = v;
+	}
+}
+
 static void opt_parse_crop(struct loc_ctx *ctx)
 {
 	if (!strcmp(optarg, "detect")) {
@@ -1202,6 +1225,8 @@ int main(int argc, char **argv)
 	char *ren_dump_dir = NULL;
 	char *vid_dump_dir = NULL;
 	int frame_cmp_luma_only = 0;
+	unsigned xthresh = VPDF_SYNC_CROPDET_XTHRESH;
+	unsigned ythresh = VPDF_SYNC_CROPDET_YTHRESH;
 
 	ctx.out = &outputs[OUT_HUMAN];
 	ctx.page_from = 0;
@@ -1211,8 +1236,9 @@ int main(int argc, char **argv)
 
 	int opt;
 	char *endptr;
-	while ((opt = getopt(argc, argv, ":C:d:D:e:hjLp:r:RuvV:y")) != -1)
+	while ((opt = getopt(argc, argv, ":c:C:d:D:e:hjLp:r:RuvV:y")) != -1)
 		switch (opt) {
+		case 'c': opt_parse_cdet_th(&xthresh, &ythresh); break;
 		case 'C': opt_parse_crop(&ctx); break;
 		case 'd':
 			vid_diff_ssim = strtof(optarg, &endptr);
@@ -1307,7 +1333,8 @@ int main(int argc, char **argv)
 	render(&ctx, ren, ren_inst);
 	ren->destroy(ren_inst);
 
-	if (crop_detect && cropdet(&ctx, &vin, crop_detect)) { /* modifies crop */
+	if (crop_detect && cropdet(&ctx, &vin, crop_detect, xthresh, ythresh)) {
+		/* cropdet() modified crop */
 		if (ctx.crop[0]+ctx.crop[1] >= ctx.h ||
 		    ctx.crop[2]+ctx.crop[3] >= ctx.w)
 			DIE(1, "error: cropping range %d:%d:%d:%d (T:B:L:R)"
